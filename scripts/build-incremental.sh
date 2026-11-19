@@ -1,77 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Incremental build for ROCK 3A — avoids the full `./build.sh` (which
-# triggers a kati --regen over the 150 GB tree on USB HDD). Only rebuilds
-# targets affected by the last device.mk change.
-# Usage: ./scripts/build-incremental.sh [extra args]
+# Incremental build for ROCK 3A — reuses out/ (no source re-sync, no clobber),
+# so only modules affected by the last device.mk/env change are recompiled.
+# Delegates to scripts/build.sh, which applies the same idempotent fixups
+# (LOCAL_TIDY, SCHEDUTIL governor, dexpreopt speed-profile, recovery size,
+# lean debloat) and then invokes the Rockchip vendor ./build.sh -UACKup to
+# produce update.img / super.img under rockdev/Image-* and IMAGE/.
+#
+# Usage: ./scripts/build-incremental.sh [extra args forwarded to build.sh]
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-ENV_FILE="${ROCK3A_ENV:-rock3a}"
-case "${ENV_FILE}" in
-  rock3a) ENV_FILE="${ROOT_DIR}/config/rock3a.env" ;;
-  lean)   ENV_FILE="${ROOT_DIR}/config/rock3a-lean.env" ;;
-  *) ENV_FILE="${ENV_FILE}" ;;
-esac
-[[ -f "${ENV_FILE}" ]] || { echo "env file missing: ${ENV_FILE}" >&2; exit 1; }
-# shellcheck source=../config/rock3a.env
-source "${ENV_FILE}"
-
-: "${SOURCE_DIR:=${ROOT_DIR}/source}"
-case "${SOURCE_DIR}" in
-  /*) ;;
-  *) SOURCE_DIR="${ROOT_DIR}/${SOURCE_DIR}" ;;
-esac
-
-cd "${SOURCE_DIR}"
-[[ -f build/envsetup.sh ]] || { echo "source tree is not prepared; run scripts/prepare.sh" >&2; exit 1; }
-
-# AOSP envsetup.sh references $ZSH_VERSION unguarded; incompatible with `set -u`.
-# Keep `set +u` for the entire envsetup + lunch sequence (vendor envsetup
-# internally accesses TOP and other vars that would trip `set -u`).
-set +u
-source build/envsetup.sh
-lunch "${PRODUCT_NAME}-${TARGET_BUILD_VARIANT}"
-
-# Fixup: the AOSP-11-era clang-tidy invocation trips cert-dcl37-c/dcl51-cpp
-# on reserved identifiers from system headers (newer host clang than the BSP
-# was tested with) and only breaks external/usb_modeswitch/usb_dongle.
-tidy_mk="${SOURCE_DIR}/external/usb_modeswitch/usb_dongle/Android.mk"
-if [[ -f "${tidy_mk}" ]] && grep -q '^LOCAL_TIDY := true$' "${tidy_mk}"; then
-  sed -i 's/^LOCAL_TIDY := true$/LOCAL_TIDY := false/' "${tidy_mk}"
-  echo "fixup: LOCAL_TIDY disabled for usb_dongle"
-fi
-# Fixup: recovery image grew 8 KiB past BOARD_RECOVERYIMAGE_PARTITION_SIZE
-rcfg="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk"
-if [[ -f "${rcfg}" ]] && grep -q '^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$' "${rcfg}"; then
-  sed -i 's/^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$/BOARD_RECOVERYIMAGE_PARTITION_SIZE := 134217728/' "${rcfg}"
-  echo "fixup: recovery partition 114552832 -> 134217728 (8KiB headroom)"
-fi
-# Performance: SCHEDUTIL governor — better CPU utilization under sustained
-# load and lower jitter for emulation. Replaces INTERACTIVE.
-kcfg="${SOURCE_DIR}/kernel/configs/rockchip/rock_3a.config"
-if [[ -f "${kcfg}" ]] && ! grep -q '^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$' "${kcfg}"; then
-  printf '\nCONFIG_SCHED_SCHEDUTIL=y\nCONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y\n' >> "${kcfg}"
-  echo "fixup: kernel governor -> SCHEDUTIL (rock_3a.config)"
-fi
-# ART: preoptimize boot-critical apps with speed-profile.
-dmk="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk"
-if [[ -f "${dmk}" ]] && ! grep -q '^PRODUCT_DEXPREOPT_SPEED_APPS' "${dmk}"; then
-  printf '\nPRODUCT_DEXPREOPT_SPEED_APPS += \\\n    SystemUI \\\n    Settings \\\n    Launcher3QuickStep\n' >> "${dmk}"
-  echo "fixup: dexpreopt speed-profile for SystemUI/Settings/Launcher3QuickStep"
-fi
-# Debloat: removes GMS, telephony/TV/print/carrier and heavy launchers/wallpapers
-if [[ "${ROCK3A_ENV:-rock3a}" == "lean" ]]; then
-  "${ROOT_DIR}/scripts/debloat.sh"
-fi
-
-# Incremental build: use `m` if defined (from envsetup.sh), else `make -j$(nproc)`
-if declare -f m >/dev/null 2>&1; then
-  m "$@"
-elif command -v make >/dev/null 2>&1; then
-  make -j"$(nproc)" "$@"
-else
-  echo "no m/make target available" >&2
-  exit 1
-fi
+echo "==> Build incremental (reuses out/): invoking scripts/build.sh"
+exec "${ROOT_DIR}/scripts/build.sh" "$@"

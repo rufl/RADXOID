@@ -69,6 +69,13 @@ if [[ -n "${CCACHE_DIR:-}" ]]; then
   mkdir -p "${CCACHE_DIR}"
   export CCACHE_DIR
 fi
+# AOSP envsetup.sh references $ZSH_VERSION unguarded; incompatible with `set -u`.
+set +u
+# shellcheck source=../source/build/envsetup.sh
+source build/envsetup.sh
+lunch "${PRODUCT_NAME}-${TARGET_BUILD_VARIANT}"
+export TARGET_PRODUCT="${PRODUCT_NAME}"
+export TARGET_BUILD_VARIANT="${TARGET_BUILD_VARIANT}"
 ./build.sh "${build_args[@]}"
 
 echo "Images are under ${SOURCE_DIR}/IMAGE"
