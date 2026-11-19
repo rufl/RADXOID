@@ -32,6 +32,7 @@ cat >> "${MK}" <<'EOF'
 
 # RADXOID_LEAN_DEBLOAT_APPLIED
 PRODUCT_PACKAGES := $(filter-out \
+    # Google GMS and services (no Play Store, no GMS) \
     GmsCore \
     GoogleServicesFramework \
     Phonesky \
@@ -41,34 +42,123 @@ PRODUCT_PACKAGES := $(filter-out \
     GooglePartnerSetup \
     GoogleCalendarSyncAdapter \
     GoogleContactsSyncAdapter \
-    TvSettings \
-    TvProvider \
-    LiveTvChannel \
+    GoogleFeedback \
+    GooglePlayServices \
+    GoogleServicesFramework \
+    \
+    # Telephony (ROCK 3A has no modem) \
     Phone \
     TeleService \
     TelephonyProvider \
     MmsService \
-    Email \
-    Exchange \
-    Launcher3QuickStepGo \
-    Books \
-    PlayBooks \
-    Music \
-    PlayMusic \
-    Videos \
-    PlayMovies \
-    News \
-    PlayNewsstand \
-    Magazines \
+    Stk \
+    ImsService \
+    ImsTelephony \
+    \
+    # TV and media center \
+    TvSettings \
+    TvProvider \
+    LiveTvChannel \
+    TvInputDtv \
+    TvInputPassthrough \
+    TvRemoteService \
+    TvRemoteProvider \
+    \
+    # Print services \
     PrintSpooler \
     PrintRecommendationService \
+    PrintServiceBroker \
+    \
+    # Carrier services \
     CarrierConfig \
     CarrierServices \
+    CarrierDefaultApp \
+    \
+    # Heavy launchers and wallpapers \
+    Launcher3QuickStepGo \
     LiveWallpapers \
     LiveWallpapersPicker \
     WallpaperPicker \
     Gallery2 \
-  , $(PRODUCT_PACKAGES))
+    GalleryNew \
+    \
+    # Media apps (not needed for gaming) \
+    Books \
+    PlayBooks \
+    Music \
+    PlayMusic \
+    MusicFX \
+    Videos \
+    PlayMovies \
+    VideoPlayer \
+    MovieStudio \
+    News \
+    PlayNewsstand \
+    Magazines \
+    \
+    # Email and contacts \
+    Email \
+    Exchange \
+    Exchange2 \
+    Contacts \
+    ContactsProvider \
+    \
+    # Calendar \
+    Calendar \
+    CalendarProvider \
+    CalendarSyncAdapter \
+    \
+    # Browser and web (optional for gaming) \
+    Browser2 \
+    WebViewGoogle \
+    \
+    # System apps that can be removed for lean image \
+    Calculator \
+    CalculatorGoogle \
+    Clock \
+    DeskClock \
+    CalendarClock \
+    SoundRecorder \
+    FMRadio \
+    Radio \
+    \
+    # Development/debug tools (not needed in production) \
+    DevelopmentSettings \
+    Bugreporter \
+    Dumpstate \
+    Logcatd \
+    \
+    # Accessibility (optional, can be added back if needed) \
+    Accessibility \
+    AccessibilitySettings \
+    TalkBack \
+    SwitchAccess \
+    \
+    # Misc system apps \
+    BasicDreams \
+    CellBroadcastReceiver \
+    CellBroadcastService \
+    EmergencyInfo \
+    FusedLocation \
+    GCS \
+    GeocoderProvider \
+    HtmlViewer \
+    KeyChain \
+    Keyguard \
+    Launcher3 \
+    Launcher3QuickStep \
+    ManagedProvisioning \
+    NetworkStack \
+    PacProcessor \
+    PermissionController \
+    Provision \
+    ProxyHandler \
+    SDCard \
+    SettingsIntelligence \
+    Shell \
+    StorageManager \
+    UserDictionaryProvider \
+    , $(PRODUCT_PACKAGES))
 EOF
 
 echo "debloat: ${MK} filtered ($(grep -c '^    ' <<< "$(sed -n '/RADXOID_LEAN_DEBLOAT_APPLIED/,$p' "${MK}")") packages)"
