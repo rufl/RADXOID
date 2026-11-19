@@ -34,17 +34,34 @@ set +u
 source build/envsetup.sh
 lunch "${PRODUCT_NAME}-${TARGET_BUILD_VARIANT}"
 
-# Re-apply the same fixups that build.sh does (idempotent; no-op if already applied).
+# Fixup: the AOSP-11-era clang-tidy invocation trips cert-dcl37-c/dcl51-cpp
+# on reserved identifiers from system headers (newer host clang than the BSP
+# was tested with) and only breaks external/usb_modeswitch/usb_dongle.
 tidy_mk="${SOURCE_DIR}/external/usb_modeswitch/usb_dongle/Android.mk"
 if [[ -f "${tidy_mk}" ]] && grep -q '^LOCAL_TIDY := true$' "${tidy_mk}"; then
   sed -i 's/^LOCAL_TIDY := true$/LOCAL_TIDY := false/' "${tidy_mk}"
   echo "fixup: LOCAL_TIDY disabled for usb_dongle"
 fi
+# Fixup: recovery image grew 8 KiB past BOARD_RECOVERYIMAGE_PARTITION_SIZE
 rcfg="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk"
 if [[ -f "${rcfg}" ]] && grep -q '^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$' "${rcfg}"; then
   sed -i 's/^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$/BOARD_RECOVERYIMAGE_PARTITION_SIZE := 134217728/' "${rcfg}"
   echo "fixup: recovery partition 114552832 -> 134217728 (8KiB headroom)"
 fi
+# Performance: SCHEDUTIL governor — better CPU utilization under sustained
+# load and lower jitter for emulation. Replaces INTERACTIVE.
+kcfg="${SOURCE_DIR}/kernel/configs/rockchip/rock_3a.config"
+if [[ -f "${kcfg}" ]] && ! grep -q '^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$' "${kcfg}"; then
+  printf '\nCONFIG_SCHED_SCHEDUTIL=y\nCONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y\n' >> "${kcfg}"
+  echo "fixup: kernel governor -> SCHEDUTIL (rock_3a.config)"
+fi
+# ART: preoptimize boot-critical apps with speed-profile.
+dmk="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk"
+if [[ -f "${dmk}" ]] && ! grep -q '^PRODUCT_DEXPREOPT_SPEED_APPS' "${dmk}"; then
+  printf '\nPRODUCT_DEXPREOPT_SPEED_APPS += \\\n    SystemUI \\\n    Settings \\\n    Launcher3QuickStep\n' >> "${dmk}"
+  echo "fixup: dexpreopt speed-profile for SystemUI/Settings/Launcher3QuickStep"
+fi
+# Debloat: removes GMS, telephony/TV/print/carrier and heavy launchers/wallpapers
 if [[ "${ROCK3A_ENV:-rock3a}" == "lean" ]]; then
   "${ROOT_DIR}/scripts/debloat.sh"
 fi
