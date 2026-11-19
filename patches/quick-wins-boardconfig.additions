@@ -1,0 +1,56 @@
+# RADXOID_PERFORMANCE_TUNED
+# ============================================
+# Quick Win Optimizations (High ROI)
+# Applied: 2026-11-19
+# ============================================
+
+# 1. Zram LZ4 Compression (faster than default LZO)
+# Impact: Faster compression/decompression, better for multi-core
+# ROI: High | Effort: Low
+BOARD_ZRAM_COMPRESSION := lz4
+
+# 2. TCP BBR Congestion Control (better for gaming)
+# Impact: Lower latency, better throughput for online gaming
+# ROI: High | Effort: Low
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.tcp.congestion_control=bbr
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_time=30
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_intvl=10
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_probes=5
+
+# 3. CPU Frequency Limits (thermal management)
+# RK3568: 4x Cortex-A55 @ 2.0GHz max
+# Conservative limit to prevent thermal throttling
+# Impact: Better sustained performance, lower power consumption
+# ROI: High | Effort: Low
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpu.max_freq=1800000
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpu.min_freq=408000
+
+# 4. LMK (Low Memory Killer) Tuning for gaming
+# Thresholds in MB: critical, low, medium, high
+# Impact: Prevents OOM kills during emulation, better memory management
+# ROI: High | Effort: Low
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.critical_threshold=150
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.low_threshold=300
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.medium_threshold=600
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.high_threshold=1024
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.kill_heaviest_task=1
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.lmk.oom_adj_score=900
+
+# 5. ART JIT Optimizations
+# Impact: Better JIT compilation performance, more methods inlined
+# ROI: Medium | Effort: Low
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.inline_depth=6
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.code_cache_size=4m
+
+# Additional optimizations
+# Zram streams for better parallel compression
+# Impact: Better multi-core utilization
+# ROI: Medium | Effort: Low
+BOARD_ZRAM_STREAMS := 4
+
+# Read-ahead size (512KB for better sequential reads)
+# Impact: Better sequential read performance
+# ROI: Medium | Effort: Low
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.kernel.read_ahead_kb=512
+
+# RADXOID_QUICK_WINS_APPLIED
