@@ -1,0 +1,8 @@
+source/
+out/
+IMAGE/
+*.img
+*.img.xz
+*.zip
+.ccache/
+artifacts/
