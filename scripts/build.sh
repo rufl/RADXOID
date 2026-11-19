@@ -62,6 +62,9 @@ fi
 if [[ "${ROCK3A_ENV:-rock3a}" == "lean" ]]; then
   "${ROOT_DIR}/scripts/debloat.sh"
 fi
+# Performance tuning: zram, swappiness, I/O scheduler, SurfaceFlinger, ART
+"${ROOT_DIR}/scripts/tune-performance.sh"
+
 if [[ -n "${BUILD_JOBS:-}" ]]; then
   export MAKEFLAGS="-j${BUILD_JOBS}"
 fi
