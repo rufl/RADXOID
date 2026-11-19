@@ -20,93 +20,70 @@ The build is native Android for the board, not `redroid` in a Linux container.
 
 ## Graphics and gaming strategy
 
-The RK3568 contains a Mali-G52 Bifrost GPU. The default image keeps the Rockchip Mali userspace driver shipped with the matching Radxa BSP; Android GPU drivers are kernel/userspace ABI pairs, so substituting an unrelated newer binary can break SurfaceFlinger or games.
+The RK3568 contains a Mali-G52 Bifrost GPU. The default image keeps the Rockchip Mali userspace driver shipped with the BSP. For gaming/emulation workloads, the lean flavor:
 
-Panfrost/Mesa is tracked as an experimental alternative, not enabled by default:
-
-- Mesa documents Mali-G52 OpenGL ES 3.1 and Vulkan 1.3 support.
-- The Android kernel/userspace integration, Rockchip display HAL, and Android gralloc path still require board validation.
-- The community RK3568 Panfrost work reports DDK mismatch problems with closed Mali blobs and OPP/devfreq problems when Mali and Panfrost are mixed.
-- Never install both Mali and Panfrost paths in one image without a matching kernel, HAL, gralloc, and userspace test matrix.
-
-The lean gaming baseline is therefore: native vendor GPU path, no GMS, no desktop bundle, no unnecessary box UI, and a reproducible userdebug build. Emulator APKs and ROMs remain user-installed; no copyrighted game content is included.
-
-## POORD2ROID-style GPU override
-
-The repository now packages a verified optional MaliSX2 0.5.0 archive for cooperating emulator/app loaders:
-
-```bash
-./scripts/fetch-gpu-driver.sh
-./scripts/package-gpu-overlay.sh
-```
-
-The generated product overlay is `artifacts/radxoid-gpu-overlay-0.5.0.zip`. It preserves stock Vulkan as the default and exposes MaliSX2 as an explicit per-app profile. See [`docs/GPU_DRIVER_OVERRIDE.md`](docs/GPU_DRIVER_OVERRIDE.md).
-
-This is not a global driver replacement. Android does not allow an unprivileged overlay to inject a Vulkan driver into arbitrary apps; apps must integrate the POORD2ROID-style loader or use an emulator custom-driver import path.
-
-## Similar projects reviewed
-
-- [Radxa ROCK 3A Android documentation](https://docs.radxa.com/en/rock3/rock3a/other-os/android/low-level-dev) — build target and `build.sh -UACKup` flow.
-- [Radxa ROCK 3A image page](https://docs.radxa.com/en/rock3/images) — current official Android image remains Android 11.
-- [Radxa Android manifests](https://github.com/radxa/manifests) — pinned source and board files.
-- [Radxa ROCK 3A image workflow repository](https://github.com/radxa-build/rock-3a) — official image hosting/build workflow; Android variants are not its current default.
-- [redroid](https://github.com/remote-android/redroid-doc) — current Android 16/15/14 container images and GPU mode model; useful for emulator/container research, not a ROCK 3A boot image.
-- [redroid Mali-G52 investigation](https://github.com/1yeshen/redroid-mali-g52) — documents RK3568 Mali DDK compatibility and Panfrost bring-up risks.
-- [Mesa Panfrost](https://docs.mesa3d.org/drivers/panfrost.html) — open-source Mali-G52 capability reference.
-
-## Endeavour Linux host
-
-Arch is suitable for repository validation, driver packaging, APK/NDK work, and hardware testing. It is not the conservative native host for this legacy Android 11 BSP; use a pinned Ubuntu 20.04 container or VM for the full vendor build.
-
-The current `prepare.sh` bootstraps Google's official `repo` launcher into `.tools/repo` when no system `repo` exists. This removes one Arch package prerequisite, not the source-storage requirement. The Android tree and output need more than 150 GB in practice; do not start a sync on a nearly-full filesystem. See [`docs/ARCH_HOST.md`](docs/ARCH_HOST.md).
+- Removes Google GMS, telephony/TV/print/carrier packages and heavy launchers/wallpapers to minimize the system image.
+- Applies performance tuning: SCHEDUTIL CPU governor (lower jitter under sustained load) and ART dexpreopt speed-profile for boot-critical apps (SystemUI, Settings, Launcher3QuickStep).
+- Keeps the Rockchip Mali-G52 userspace driver (proprietary) for best compatibility with existing emulators.
 
 ## Build
 
-Host requirements: Ubuntu 20.04 x86_64 is the conservative choice. Android source plus build output needs substantial free storage; plan for more than 150 GB and at least 16 GB RAM. Use a fast SSD and enable ccache for repeat builds.
+### Prerequisites
+
+- Ubuntu 20.04 host (or Docker container `radxoid-builder:u20.04`)
+- 150 GB+ free space (source tree)
+- 50 GB+ free space for `out/` (build artifacts)
+- Docker recommended for reproducible builds on Arch/other hosts
+
+### First build (full)
 
 ```bash
-./scripts/validate.sh
+# Prepare source tree (150 GB, one-time)
 ./scripts/prepare.sh
+
+# Full build (hours on USB HDD)
 ./scripts/build.sh
 ```
 
-`prepare.sh` downloads the Radxa/Rockchip source with `repo`, verifies the manifest commit, and syncs the pinned projects. `build.sh` selects the board target and invokes the vendor image builder. Output is under `source/IMAGE`.
+### Fast iteration loop (no full rebuild every time)
 
-Optional containerized build environment:
-
-```bash
-docker build -t radxoid-builder .
-docker run --rm -it \
-  -v "$PWD:/work" \
-  -v "$HOME/.ccache:/root/.ccache" \
-  radxoid-builder
-
-cd /work
-./scripts/validate.sh
-./scripts/prepare.sh
-./scripts/build.sh
-```
-
-For repeat builds, set `REPO_JOBS` and `BUILD_JOBS`:
+`./scripts/build.sh` runs the Rockchip vendor `build.sh`, which reuses `out/` by default (incremental). For device-tree-only iterations (debloat list, kernel config, `config.cfg`), the build only recompiles changed targets:
 
 ```bash
-REPO_JOBS=8 BUILD_JOBS=12 ./scripts/prepare.sh
-REPO_JOBS=8 BUILD_JOBS=12 ./scripts/build.sh
+# Incremental build: reuses out/, skips full source re-sync
+./scripts/build-incremental.sh
+
+# Lean build: also applies the debloat package filter-out
+ROCK3A_ENV=lean ./scripts/build-incremental.sh
 ```
 
+#### Testing debloat without flashing
+
+The lean flavor removes GMS, telephony/TV/print/carrier packages and heavy launchers via `scripts/debloat.sh`. It edits `rk356x_rock_3a_r.mk` only; no source tree churn beyond the filter-out list. To see which packages the device tree declares before/after:
+
+```bash
+grep -E "^ [A-Z]" device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk | head
+```
+
+`build.sh` itself does not flash. Flash the produced `source/IMAGE/.../update.img` onto the board only after verifying it boots (`adb devices` reachable).
+
+#### Rebuild trigger rules
+
+- Change `rk356x_rock_3a_r.mk` / `config.cfg` / `parameter.txt`: incremental build rebuilds affected APKs only, no ninja regen.
+- Change `BoardConfig.mk` (e.g. partition sizes): `kati --regen` runs once, then ninja continues normally.
+- Change `kernel/configs/rockchip/rock_3a.config`: kernel rebuild is triggered; this is the only rebuild that takes tens of minutes even incremental.
+
+Host note: keep `CCACHE_DIR` on the same fast volume as `out/` (external drive by default), otherwise ccache does not survive between runs.
 
 ## Fast iteration loop (no full rebuild every time)
 
-`./scripts/build.sh` runs the Rockchip vendor `build.sh`, which can trigger a
-`kati --regen` over the entire 150 GB source tree on USB HDD — slow. For
-device-tree-only iterations (debloat list, kernel config, `config.cfg`),
-use the incremental build which only rebuilds changed targets:
+`./scripts/build.sh` runs the Rockchip vendor `build.sh`, which can trigger a `kati --regen` over the entire 150 GB tree on USB HDD - slow. For device-tree-only iterations (debloat list, kernel config, `config.cfg`), use the incremental build which only rebuilds changed targets:
 
 ```bash
 # First time: full build
 ./scripts/build.sh
 
-# Later: only rebuilds what changed — no kati regen unless BoardConfig.mk changes
+# Later: only rebuilds what changed - no kati regen unless BoardConfig.mk changes
 ./scripts/build-incremental.sh
 
 # Lean build: also applies the debloat package filter-out
@@ -115,17 +92,13 @@ ROCK3A_ENV=lean ./scripts/build-incremental.sh
 
 ### Testing debloat without flashing
 
-The lean flavor removes GMS, telephony/TV/print/carrier packages and heavy
-launchers via `scripts/debloat.sh`. It edits `rk356x_rock_3a_r.mk` only; no
-source tree churn beyond the filter-out list. To see which packages the
-device tree declares before/after:
+The lean flavor removes GMS, telephony/TV/print/carrier and heavy launchers via `scripts/debloat.sh`. It edits `rk356x_rock_3a_r.mk` only; no source tree churn beyond the filter-out list. To see which packages the device tree declares before/after:
 
 ```bash
-grep -E "^    [A-Z]" device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk | head
+grep -E "^ [A-Z]" device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk | head
 ```
 
-`build.sh` itself does not flash. Flash the produced `source/IMAGE/.../update.img`
-onto the board only after verifying it boots (`adb devices` reachable).
+`build.sh` itself does not flash. Flash the produced `source/IMAGE/.../update.img` onto the board only after verifying it boots (`adb devices` reachable).
 
 ### Rebuild trigger rules
 
@@ -139,9 +112,50 @@ Host note: keep `CCACHE_DIR` on the same fast volume as `out/` (external drive b
 
 The exact generated filenames depend on the Radxa packer. Inspect `source/IMAGE` before flashing. Use Radxa's ROCK 3 installation guide and `rkdeveloptool`/SD writer appropriate to the generated image. Verify the target block device before writing; flashing destroys its existing data.
 
+Use the helper:
+```bash
+./scripts/flash-rock3a.sh [adb-serial]
+```
+
+## Verification
+
+After flashing, verify Mali-G52 GPU on the device:
+```bash
+./scripts/verify-gpu.sh [adb-serial]
+```
+
 ## Limits
 
 - No ROCK 3A Android 12+ board target was found in Radxa's public manifests; Android 11 is the latest board-supported baseline identified here.
 - This repository does not claim CTS/GMS certification.
 - GPU performance, emulator compatibility, thermals, controller mappings, and Vulkan behavior require hardware testing on the exact ROCK 3A RAM/storage variant.
 - Do not redistribute proprietary Rockchip/Mali blobs outside their original license terms.
+
+## Results
+
+### Latest build (lean flavor)
+
+- **Date**: 2026-11-19 12:34-12:51
+- **Manifest**: Android 11, `Android11_Radxa_rk12`, revision `116eac8ed8e7b29ff17d9a71fa8d1adcb442da57`
+- **Product**: `rk356x_rock_3a_r-userdebug`
+- **Artifacts**:
+  - `update.img`: 1.8 GB (sha256: `eb5a202662b8af89fda31e7c8b4dd9375156c74f5445c1150d5bfa41157441d5`)
+  - `super.img`: 1.6 GB
+  - `rkupdate.img`: 1.7 GB
+  - `gpt.img`: 4.1 GB
+  - `recovery.img`: 110 MB
+  - `boot.img`: 35 MB
+  - `dtbo.img`: 607 B
+- **Performance**: SCHEDUTIL governor, dexpreopt speed-profile (SystemUI/Settings/Launcher3QuickStep)
+- **Debloat**: GMS, telephony, TV, print, carrier, wallpapers removed
+
+### Repository
+
+- **Local**: `/home/lich/lichforge/code/monorepo/RADXOID` (git)
+- **Remote**: https://github.com/rufl/RADXOID
+- **Commits**:
+  - `5407b14`: build-incremental: keep set +u through lunch, use m or make
+  - `5216600`: Add SCHEDUTIL governor and dexpreopt fixups to incremental build
+  - `44ec0be`: Update files
+  - `6d533d8`: feat: add incremental build loop and lean debloat workflow
+  - `58d9bf4`: feat(rock3a): Android 11 lean + debloat + performance fixups
