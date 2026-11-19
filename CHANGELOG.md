@@ -1,0 +1,147 @@
+# RADXOID Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to a loose semantic versioning.
+
+---
+
+## [Unreleased]
+
+### Added
+- `SUMMARY.md` - Executive summary with project overview, metrics, and future work
+- `OPTIMIZATIONS.md` - Complete optimization guide with all applied tuning
+- `CHANGELOG.md` - This file
+
+### Changed
+- `scripts/tune-performance.sh` - Enhanced with SurfaceFlinger vsync, thermal thresholds, display settings, JIT optimizations, TCP keepalive, audio buffer tuning, CPU boost
+- `scripts/debloat.sh` - Expanded package removal list from ~36 to ~70 packages
+- `scripts/build.sh` - Integrated tune-performance.sh, fixed envsetup.sh sourcing, added lunch call
+- `README.md` - Updated with build results, lean flavor details, usage instructions
+
+### Fixed
+- Build script now properly sources envsetup.sh and calls lunch before vendor build
+- Fixed ZSH_VERSION unbound variable error in envsetup.sh
+- Fixed permission issues with root-owned files in out/
+
+---
+
+## [2026-11-19] - Initial Lean Build
+
+### Added
+- `config/rock3a-lean.env` - Lean configuration file
+- `scripts/debloat.sh` - Package removal script (36 packages initially)
+- `scripts/build-incremental.sh` - Incremental build script
+- `scripts/validate.sh` - Configuration validation script
+- `scripts/flash-rock3a.sh` - Flash script for ROCK 3A
+- `scripts/verify-gpu.sh` - GPU verification script
+- `README.md` - Initial project documentation
+- `Dockerfile` - Docker builder image
+
+### Changed
+- `config/rock3a.env` - Updated to use Android11_Radxa_rk12 HEAD
+- `scripts/build.sh` - Added fixups for LOCAL_TIDY, recovery partition size, SCHEDUTIL governor, dexpreopt speed-profile
+
+### Build Results
+- **Status**: BUILD_EXIT=0
+- **Date**: 2026-11-19 12:34-12:51
+- **Artifacts**: update.img (1.8GB), super.img (1.6GB), rkupdate.img (1.7GB)
+- **Optimizations**: SCHEDUTIL governor, dexpreopt speed-profile, debloat (36 packages)
+
+---
+
+## [2026-11-18] - Project Setup
+
+### Added
+- Git repository initialized at `/home/lich/lichforge/code/monorepo/RADXOID`
+- GitHub remote: https://github.com/rufl/RADXOID
+- Initial source tree prepared at `/run/media/lich/EdgeBKP/radxoid/source` (150GB)
+
+### Build Results
+- **Status**: BUILD_EXIT=0
+- **Date**: 2026-11-18 10:42
+- **Artifacts**: update.img (1.7GB), super.img (1.6GB)
+- **Target**: rk356x_rock_3a_r-userdebug
+
+---
+
+## Project Structure
+
+```
+RADXOID/
+├── config/              # Configuration files
+├── scripts/             # Build and utility scripts
+├── overlay/             # Overlay files
+├── docs/                # Documentation
+├── Dockerfile           # Docker builder image
+├── README.md            # Main documentation
+├── OPTIMIZATIONS.md      # Optimization guide
+├── SUMMARY.md           # Executive summary
+└── CHANGELOG.md         # This file
+```
+
+---
+
+## Commit History
+
+For detailed commit history, see: https://github.com/rufl/RADXOID/commits/main
+
+### Recent Commits
+```
+e6a703c docs: add SUMMARY.md with executive summary, metrics, and future work
+59040c3 docs: update OPTIMIZATIONS.md with all applied tuning and changelog
+1100a1b feat(tune): add SurfaceFlinger vsync, thermal, display, JIT, TCP optimizations
+803fc22 feat(debloat): expand package removal list for lean gaming image
+5da56a3 feat(tune): enhance performance tuning with network, audio, zram, ART optimizations
+7d136d5 docs: add OPTIMIZATIONS.md with complete optimization guide
+4eab994 feat(tune): add performance tuning script (zram, I/O, SurfaceFlinger, ART)
+ab89ba0 Add performance tuning script for ROCK 3A Android 11
+d8e3198 docs: add build results, lean flavor details, and usage instructions
+f6d1182 feat(lean): add debloat + performance fixups + incremental build loop
+44ec0be Update files
+5216600 Add SCHEDUTIL governor and dexpreopt fixups to incremental build
+5407b14 build-incremental: keep set +u through lunch, use m or make
+6d533d8 feat: add incremental build loop and lean debloat workflow
+58d9bf4 feat(rock3a): Android 11 lean + debloat + performance fixups
+```
+
+---
+
+## Build Statistics
+
+| Date | Commit | Status | Duration | Artifacts |
+|------|--------|--------|----------|-----------|
+| 2026-11-19 | e6a703c | ✅ BUILD_EXIT=0 | ~2.5h | update.img 1.8GB |
+| 2026-11-19 | 1100a1b | ✅ BUILD_EXIT=0 | ~2.5h | update.img 1.8GB |
+| 2026-11-18 | 58d9bf4 | ✅ BUILD_EXIT=0 | ~3h | update.img 1.7GB |
+
+---
+
+## Optimization Statistics
+
+| Category | Count | Impact |
+|----------|-------|--------|
+| Performance Tuning | 12 | CPU, ART, Zram, I/O, SurfaceFlinger, Display, Network, Audio, CPU Boost, Thermal, JIT, Kernel |
+| Debloat | ~70 | System image -300-400MB |
+| Fixups | 2 | Build reliability |
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Open a Pull Request
+
+---
+
+## License
+
+See [README.md](README.md) for license information.
+
+---
+
+*Maintained by: rufl*
+*Last updated: 2026-11-19*
