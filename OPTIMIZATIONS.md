@@ -76,6 +76,9 @@ ROCK3A_ENV=lean ./scripts/build-incremental.sh
 ```
 CONFIG_SCHED_SCHEDUTIL=y
 CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+CONFIG_GENERIC_CPUFREQ_CPU0=y
+CONFIG_ARM_BIG_LITTLE_CPUFREQ=y
+CONFIG_ARM64_CPUFREQ_CPPC=y
 ```
 **Impact**: Better CPU utilization under sustained load, lower jitter for emulation compared to INTERACTIVE governor.
 **Trade-off**: Slightly higher power consumption under light load.
@@ -88,30 +91,40 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
 PRODUCT_DEXPREOPT_SPEED_APPS += \
     SystemUI \
     Settings \
-    Launcher3QuickStep
+    Launcher3QuickStep \
+    LatinIME \
+    PackageInstaller
+WITH_DEXPREOPT := true
+PRODUCT_DEXPREOPT_SPEED_APPS_FILTER := speed-profile
+PRODUCT_DEXPREOPT_PROFILE_GUIDED_OPTIMIZATION := true
 ```
 **Impact**: Faster app launch and smoother animations for boot-critical apps.
 **Trade-off**: Slightly larger system image (~10-20MB).
 
-#### 2.3 Profile-Guided Optimization
+#### 2.3 ART JIT Optimizations
 **Status**: ✅ Applied
-**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk`
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
 **Changes**:
 ```
-PRODUCT_DEXPREOPT_PROFILE_GUIDED_OPTIMIZATION := true
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm64.variant=generic
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm.variant=generic
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm64.features=default
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.inline=4
+TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.codeCacheSize=2097152
 ```
-**Impact**: Better optimization of hot code paths.
+**Impact**: Better JIT compilation performance for Cortex-A55.
 
 #### 2.4 Zram Configuration
-**Status**: ✅ Applied (default in Rockchip BSP)
-**File**: `device/rockchip/common/device.mk`
+**Status**: ✅ Applied
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
 **Changes**:
 ```
-persist.sys.zram_enabled=1
-ro.zram.mark_idle_delay_mins=60
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.config.swappiness=100
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.config.zram_size=75
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.zram.mark_idle_delay_mins=60
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.config.zram_writeback=1
 ```
-**Additional**: `swappiness=100` (via `tune-performance.sh`)
-**Impact**: Better memory compression and management.
+**Impact**: Better memory compression (75% of RAM), writeback enabled.
 
 #### 2.5 I/O Scheduler: Deadline
 **Status**: ✅ Applied
@@ -130,29 +143,75 @@ TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.iostat.scheduler=deadline
 ```
 TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.sf.use_triple_buffer=1
 TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.sf.use_phase_offsets=0
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.sf.vsync=0
 ```
-**Impact**: Smoother rendering with lower latency.
-**Trade-off**: Slightly higher memory usage.
+**Impact**: Smoother rendering with lower latency (vsync disabled is experimental).
+**Trade-off**: vsync disabled may cause screen tearing.
 
-#### 2.7 ART ISA Variants
+#### 2.7 Display: Frame Rate
 **Status**: ✅ Applied
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
 **Changes**:
 ```
-TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm64.variant=generic
-TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm.variant=generic
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.display.refresh_rate=60
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.display.adaptive_refresh=0
 ```
-**Impact**: Optimized for Cortex-A55 CPU in RK3568.
+**Impact**: Consistent 60Hz refresh rate.
 
-#### 2.8 CPU Frequency Stats
+#### 2.8 Network: Buffer Sizes
 **Status**: ✅ Applied
-**File**: `kernel/configs/rockchip/rock_3a.config`
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
 **Changes**:
 ```
-CONFIG_CPUFREQ_DT=y
-CONFIG_CPUFREQ_STATS=y
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.rmem_max=16777216
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.wmem_max=16777216
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.rmem_default=1048576
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.wmem_default=1048576
 ```
-**Impact**: Enables CPU frequency monitoring for debugging.
+**Impact**: Better network performance for online gaming.
+
+#### 2.9 TCP Keepalive
+**Status**: ✅ Applied
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**:
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_time=30
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_intvl=10
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_probes=5
+```
+**Impact**: Better connection stability.
+
+#### 2.10 Audio: Latency Reduction
+**Status**: ✅ Applied
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**:
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.flinger.boost=1
+TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.deep_buffer.media=0
+TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.offload.buffer.size.kb=128
+```
+**Impact**: Lower audio latency for gaming.
+
+#### 2.11 CPU Boost
+**Status**: ✅ Applied
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**:
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.enable=1
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.duration=1000
+```
+**Impact**: Faster response to interactive tasks.
+
+#### 2.12 Thermal: Cooling Thresholds
+**Status**: ✅ Applied
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**:
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.cpu.threshold=60
+TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.gpu.threshold=55
+```
+**Impact**: Better sustained performance under load.
+**Trade-off**: May throttle earlier under heavy load.
 
 ---
 
@@ -162,62 +221,64 @@ CONFIG_CPUFREQ_STATS=y
 **Script**: `scripts/debloat.sh`
 **Target**: `ROCK3A_ENV=lean`
 
-#### 3.1 Removed Packages (36 packages)
+#### 3.1 Removed Packages (~70 packages)
 
-**Google GMS**:
-- GmsCore
-- GoogleServicesFramework
-- Phonesky (Play Store)
-- GoogleOneTimeInitializer
-- GoogleLoginService
-- GoogleBackupTransport
-- GooglePartnerSetup
-- GoogleCalendarSyncAdapter
-- GoogleContactsSyncAdapter
+**Google GMS and Services**:
+- GmsCore, GoogleServicesFramework, Phonesky (Play Store)
+- GoogleOneTimeInitializer, GoogleLoginService, GoogleBackupTransport
+- GooglePartnerSetup, GoogleCalendarSyncAdapter, GoogleContactsSyncAdapter
+- GoogleFeedback, GooglePlayServices
 
-**Telephony**:
-- Phone
-- TeleService
-- TelephonyProvider
-- MmsService
+**Telephony** (ROCK 3A has no modem):
+- Phone, TeleService, TelephonyProvider, MmsService
+- Stk, ImsService, ImsTelephony
 
-**TV**:
-- TvSettings
-- TvProvider
-- LiveTvChannel
+**TV and Media Center**:
+- TvSettings, TvProvider, LiveTvChannel
+- TvInputDtv, TvInputPassthrough, TvRemoteService, TvRemoteProvider
 
-**Print**:
-- PrintSpooler
-- PrintRecommendationService
+**Print Services**:
+- PrintSpooler, PrintRecommendationService, PrintServiceBroker
 
-**Carrier**:
-- CarrierConfig
-- CarrierServices
+**Carrier Services**:
+- CarrierConfig, CarrierServices, CarrierDefaultApp
 
-**Wallpapers/Launchers**:
-- Launcher3QuickStepGo
-- LiveWallpapers
-- LiveWallpapersPicker
-- WallpaperPicker
-- Gallery2
+**Heavy Launchers and Wallpapers**:
+- Launcher3QuickStepGo, LiveWallpapers, LiveWallpapersPicker
+- WallpaperPicker, Gallery2, GalleryNew
 
-**Media Apps**:
-- Books
-- PlayBooks
-- Music
-- PlayMusic
-- Videos
-- PlayMovies
-- News
-- PlayNewsstand
-- Magazines
+**Media Apps** (not needed for gaming):
+- Books, PlayBooks, Music, PlayMusic, MusicFX
+- Videos, PlayMovies, VideoPlayer, MovieStudio
+- News, PlayNewsstand, Magazines
 
-**Config Files**:
-- apns-full-conf.xml (removed from PRODUCT_COPY_FILES)
-- spn-conf.xml (removed from PRODUCT_COPY_FILES)
+**Email and Contacts**:
+- Email, Exchange, Exchange2, Contacts, ContactsProvider
+- Calendar, CalendarProvider, CalendarSyncAdapter
+
+**Browser and Web**:
+- Browser2, WebViewGoogle
+
+**System Apps** (can be re-added if needed):
+- Calculator, CalculatorGoogle, Clock, DeskClock, CalendarClock
+- SoundRecorder, FMRadio, Radio
+
+**Development/Debug Tools**:
+- DevelopmentSettings, Bugreporter, Dumpstate
+
+**Accessibility** (optional):
+- Accessibility, AccessibilitySettings, TalkBack, SwitchAccess
+
+**Misc System Apps**:
+- BasicDreams, CellBroadcastReceiver, CellBroadcastService
+- EmergencyInfo, FusedLocation, GCS, GeocoderProvider
+- HtmlViewer, KeyChain, Keyguard, ManagedProvisioning
+- NetworkStack, PacProcessor, PermissionController
+- Provision, ProxyHandler, SDCard, SettingsIntelligence
+- Shell, StorageManager, UserDictionaryProvider
 
 #### 3.2 Impact
-- **System Image Size**: Reduced by ~200-300MB
+- **System Image Size**: Reduced by ~300-400MB
 - **Boot Time**: Slightly faster (fewer services to start)
 - **Memory Usage**: Lower (fewer background services)
 - **Security**: Reduced attack surface
@@ -310,84 +371,135 @@ ROCK3A_ENV=lean ./scripts/build-incremental.sh
 
 #### 1. Kernel: CPU Frequency Limits
 **File**: `kernel/configs/rockchip/rock_3a.config`
-**Changes**:
+**Changes**: Set min/max frequencies for better thermals
 ```
+# Example: Limit max to 1.8GHz for better thermals
+# Requires testing on actual hardware
 CONFIG_CPUFREQ_DT=y
 CONFIG_CPUFREQ_STATS=y
-# Set min/max frequencies for better thermals
-# Requires testing on actual hardware
 ```
 **Impact**: Better thermal management, reduced throttling.
+**Risk**: May reduce peak performance.
 
 #### 2. Kernel: GPU Frequency Scaling
 **File**: `kernel/configs/rockchip/rock_3a.config`
-**Changes**: Enable Mali GPU frequency scaling (if available in RK3568 kernel)
+**Changes**: Enable Mali GPU frequency scaling (if available)
 **Impact**: Better GPU performance/power balance.
+**Risk**: May not be available in RK3568 kernel.
 
 #### 3. ART: More Speed-Profile Apps
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk`
-**Changes**: Add more apps to `PRODUCT_DEXPREOPT_SPEED_APPS`
+**Changes**: Add more commonly used apps
 ```
 PRODUCT_DEXPREOPT_SPEED_APPS += \
     SystemUI \
     Settings \
     Launcher3QuickStep \
     LatinIME \
-    PackageInstaller
+    PackageInstaller \
+    Camera2 \
+    MediaProvider
 ```
-**Impact**: Faster launch for commonly used apps.
+**Impact**: Faster launch for more apps.
+**Trade-off**: Larger system image.
 
-#### 4. Zram: Larger Size
-**File**: `device/rockchip/common/device.mk`
-**Changes**: Increase zram size for better compression
-**Impact**: More memory available for apps.
+#### 4. Zram: Compression Algorithm
+**File**: `kernel/configs/rockchip/rock_3a.config`
+**Changes**: Use LZ4 or ZSTD for better compression
+```
+CONFIG_ZRAM_LZ4_COMPRESS=y
+# or
+CONFIG_ZRAM_ZSTD_COMPRESS=y
+```
+**Impact**: Better compression ratio, lower CPU usage.
+**Risk**: ZSTD may not be available in Android 11 kernel.
+
+#### 5. I/O: readahead and nr_requests
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**:
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.kernel.android.readahead=512
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.kernel.android.nr_requests=256
+```
+**Impact**: Better I/O performance for sequential reads.
 
 ### Medium ROI
 
-#### 5. I/O: F2FS for System
+#### 6. I/O: F2FS for System
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/recovery.fstab`
-**Changes**: Use F2FS for `/system` partition (currently ext4)
+**Changes**: Use F2FS for `/system` partition
 **Impact**: Faster app installation and updates.
-**Risk**: May require repartitioning.
+**Risk**: May require repartitioning, not all devices support F2FS for system.
 
-#### 6. Network: Buffer Sizes
+#### 7. Network: TCP Congestion Control
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
-**Changes**: Increase network buffer sizes for better throughput
+**Changes**: Use BBR or Cubic for better throughput
 ```
-TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.rmem_max=16777216
-TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.wmem_max=16777216
+# Check if kernel supports BBR (4.9+)
+TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_congestion_control=bbr
 ```
 **Impact**: Better network performance for online gaming.
+**Risk**: BBR may not be available in RK3568 kernel.
 
-#### 7. Audio: Latency Reduction
+#### 8. Audio: Sample Rate
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
-**Changes**: Reduce audio buffer sizes
+**Changes**: Force 48kHz sample rate for lower latency
 ```
-TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.flinger.boost=1
-TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.deep_buffer.media=0
+TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.flinger.out_samplingrate=48000
 ```
-**Impact**: Lower audio latency for games.
+**Impact**: Lower audio latency.
+**Trade-off**: May not work with all audio content.
+
+#### 9. Power: Interactive Governor Tuning
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**: Tune interactive governor parameters
+```
+# If using INTERACTIVE governor instead of SCHEDUTIL
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.interactive.governor.enabled=1
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.interactive.min_freq=400000
+```
+**Impact**: Better battery life with interactive governor.
+
+#### 10. Thermal: Custom Throttling
+**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
+**Changes**: Custom thermal engine configuration
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.cpu.threshold=65
+TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.gpu.threshold=60
+TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.cpu.freq=1200000
+```
+**Impact**: Better sustained performance.
+**Risk**: May cause overheating if not tested.
 
 ### Low ROI (Optional)
 
-#### 8. Display: Refresh Rate
+#### 11. Display: Color Mode
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
-**Changes**: Force 60Hz refresh rate
-**Impact**: More consistent frame pacing.
-
-#### 9. Power: CPU Boost
-**File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
-**Changes**: Enable CPU boost for interactive tasks
+**Changes**: Force sRGB color mode
 ```
-TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.enable=1
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.display.color_mode=sRGB
 ```
-**Impact**: Faster response to user input.
+**Impact**: More consistent color reproduction.
 
-#### 10. Thermal: Engine Configuration
+#### 12. Power: Suspend to RAM
+**File**: `kernel/configs/rockchip/rock_3a.config`
+**Changes**: Enable suspend to RAM
+```
+CONFIG_SUSPEND=y
+CONFIG_SUSPEND_FREEZER=y
+```
+**Impact**: Lower power consumption when idle.
+**Risk**: May not work reliably on all devices.
+
+#### 13. Security: SELinux Permissive
 **File**: `device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk`
-**Changes**: Adjust thermal engine thresholds
-**Impact**: Better sustained performance under load.
-**Risk**: May cause overheating if not tested.
+**Changes**: Set SELinux to permissive for debugging
+```
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.secure=0
+TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.build.selinux=0
+```
+**Impact**: Easier debugging.
+**Risk**: Reduced security.
 
 ---
 
@@ -396,10 +508,11 @@ TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.enable=1
 - [x] Build completes with `BUILD_EXIT=0`
 - [x] `update.img` generated (1.8GB)
 - [x] `super.img` generated (1.6GB)
-- [x] Debloat applied (36 packages removed)
-- [x] Performance tuning applied (SCHEDUTIL, dexpreopt, etc.)
+- [x] Debloat applied (~70 packages removed)
+- [x] Performance tuning applied (SCHEDUTIL, dexpreopt, zram, I/O, SurfaceFlinger, ART, network, audio, CPU boost, thermal)
 - [x] All scripts have valid syntax (`bash -n`)
 - [x] README.md documented
+- [x] OPTIMIZATIONS.md documented
 - [x] GitHub repo created and pushed
 
 ---
@@ -430,6 +543,28 @@ TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.enable=1
 - [Mali-G52 Documentation](https://developer.arm.com/ip-products/graphics-and-multimedia/mali-gpus/mali-g52)
 - [Panfrost Driver](https://docs.mesa3d.org/drivers/panfrost.html)
 - [AOSP Build System](https://source.android.com/docs/setup/build)
+- [Android Performance Patterns](https://source.android.com/docs/core/performance)
+
+---
+
+## Changelog
+
+### 2026-11-19
+- Added SurfaceFlinger vsync disable (experimental)
+- Added thermal engine thresholds (CPU: 60°C, GPU: 55°C)
+- Added display refresh rate (60Hz) and adaptive refresh disable
+- Added ART JIT optimizations (inline=4, codeCacheSize=2MB)
+- Added TCP keepalive optimization
+- Added audio offload buffer size reduction (128KB)
+- Added CPU boost duration (1000ms)
+- Expanded debloat list to ~70 packages
+
+### 2026-11-18
+- Initial Android 11 lean build completed
+- Applied SCHEDUTIL governor
+- Applied dexpreopt speed-profile
+- Applied initial debloat (~36 packages)
+- Created build scripts and documentation
 
 ---
 
