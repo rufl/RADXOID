@@ -94,6 +94,47 @@ REPO_JOBS=8 BUILD_JOBS=12 ./scripts/prepare.sh
 REPO_JOBS=8 BUILD_JOBS=12 ./scripts/build.sh
 ```
 
+
+## Fast iteration loop (no full rebuild every time)
+
+`./scripts/build.sh` runs the Rockchip vendor `build.sh`, which can trigger a
+`kati --regen` over the entire 150 GB source tree on USB HDD — slow. For
+device-tree-only iterations (debloat list, kernel config, `config.cfg`),
+use the incremental build which only rebuilds changed targets:
+
+```bash
+# First time: full build
+./scripts/build.sh
+
+# Later: only rebuilds what changed — no kati regen unless BoardConfig.mk changes
+./scripts/build-incremental.sh
+
+# Lean build: also applies the debloat package filter-out
+ROCK3A_ENV=lean ./scripts/build-incremental.sh
+```
+
+### Testing debloat without flashing
+
+The lean flavor removes GMS, telephony/TV/print/carrier packages and heavy
+launchers via `scripts/debloat.sh`. It edits `rk356x_rock_3a_r.mk` only; no
+source tree churn beyond the filter-out list. To see which packages the
+device tree declares before/after:
+
+```bash
+grep -E "^    [A-Z]" device/rockchip/rk356x/rk356x_rock_3a_r/rk356x_rock_3a_r.mk | head
+```
+
+`build.sh` itself does not flash. Flash the produced `source/IMAGE/.../update.img`
+onto the board only after verifying it boots (`adb devices` reachable).
+
+### Rebuild trigger rules
+
+- Change `rk356x_rock_3a_r.mk` / `config.cfg` / `parameter.txt`: incremental build rebuilds affected APKs only, no ninja regen.
+- Change `BoardConfig.mk` (e.g. partition sizes): `kati --regen` runs once, then ninja continues normally.
+- Change `kernel/configs/rockchip/rock_3a.config`: kernel rebuild is triggered; this is the only rebuild that takes tens of minutes even incremental.
+
+Host note: keep `CCACHE_DIR` on the same fast volume as `out/` (external drive by default), otherwise ccache does not survive between runs.
+
 ## Flashing
 
 The exact generated filenames depend on the Radxa packer. Inspect `source/IMAGE` before flashing. Use Radxa's ROCK 3 installation guide and `rkdeveloptool`/SD writer appropriate to the generated image. Verify the target block device before writing; flashing destroys its existing data.
