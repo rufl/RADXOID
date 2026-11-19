@@ -18,7 +18,7 @@ esac
 cd "${SOURCE_DIR}"
 
 # ============================================================
-# 1. Kernel: SCHEDUTIL governor
+# 1. Kernel: CPU Governor and Frequency Scaling
 # ============================================================
 kcfg="${SOURCE_DIR}/kernel/configs/rockchip/rock_3a.config"
 if [[ -f "${kcfg}" ]]; then
@@ -42,6 +42,21 @@ if [[ -f "${kcfg}" ]]; then
     echo "CONFIG_GENERIC_CPUFREQ_CPU0=y" >> "${kcfg}"
     echo "tune: GENERIC_CPUFREQ_CPU0 enabled"
   fi
+  # Enable CPU frequency scaling stats in sysfs
+  if ! grep -q '^CONFIG_CPUFREQ_STATS=y$' "${kcfg}"; then
+    echo "CONFIG_CPUFREQ_STATS=y" >> "${kcfg}"
+    echo "tune: CPUFREQ_STATS already enabled"
+  fi
+  # Enable CPU frequency scaling for big.LITTLE (RK3568 has 4x Cortex-A55)
+  if ! grep -q '^CONFIG_ARM_BIG_LITTLE_CPUFREQ=y$' "${kcfg}"; then
+    echo "CONFIG_ARM_BIG_LITTLE_CPUFREQ=y" >> "${kcfg}"
+    echo "tune: ARM_BIG_LITTLE_CPUFREQ enabled"
+  fi
+  # Enable CPU frequency scaling for ARM64
+  if ! grep -q '^CONFIG_ARM64_CPUFREQ_CPPC=y$' "${kcfg}"; then
+    echo "CONFIG_ARM64_CPUFREQ_CPPC=y" >> "${kcfg}"
+    echo "tune: ARM64_CPUFREQ_CPPC enabled"
+  fi
 fi
 
 # ============================================================
@@ -62,6 +77,11 @@ if [[ -f "${dmk}" ]]; then
   if ! grep -q '^PRODUCT_DEXPREOPT_SPEED_APPS_FILTER' "${dmk}"; then
     echo "PRODUCT_DEXPREOPT_SPEED_APPS_FILTER := speed-profile" >> "${dmk}"
     echo "tune: speed-profile filter applied"
+  fi
+  # Enable dexpreopt for all apps (not just speed)
+  if ! grep -q '^WITH_DEXPREOPT' "${dmk}"; then
+    echo "WITH_DEXPREOPT := true" >> "${dmk}"
+    echo "tune: dexpreopt enabled for all apps"
   fi
 fi
 
@@ -91,6 +111,11 @@ if [[ -f "${bcfg}" ]]; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.zram.mark_idle_delay_mins=60" >> "${bcfg}"
     echo "tune: zram mark idle delay = 60min"
   fi
+  # Zram: enable writeback for better performance
+  if ! grep -q 'ro.config.zram_writeback' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.config.zram_writeback=1" >> "${bcfg}"
+    echo "tune: zram writeback enabled"
+  fi
 fi
 
 # ============================================================
@@ -104,6 +129,11 @@ if [[ -f "${bcfg}" ]]; then
   if ! grep -q 'ro.sys.sf.use_phase_offsets' "${bcfg}"; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.sf.use_phase_offsets=0" >> "${bcfg}"
     echo "tune: SurfaceFlinger phase offsets disabled"
+  fi
+  # Disable vsync for lower latency (experimental)
+  if ! grep -q 'ro.sys.sf.vsync' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.sf.vsync=0" >> "${bcfg}"
+    echo "tune: SurfaceFlinger vsync disabled (experimental)"
   fi
 fi
 
@@ -124,6 +154,16 @@ if [[ -f "${bcfg}" ]]; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.isa.arm64.features=default" >> "${bcfg}"
     echo "tune: ART arm64 features -> default"
   fi
+  # Enable JIT inline optimizations
+  if ! grep -q 'dalvik.vm.jit.inline' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.inline=4" >> "${bcfg}"
+    echo "tune: ART JIT inline depth -> 4"
+  fi
+  # Enable JIT code caching
+  if ! grep -q 'dalvik.vm.jit.codeCacheSize' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += dalvik.vm.jit.codeCacheSize=2097152" >> "${bcfg}"
+    echo "tune: ART JIT code cache size -> 2MB"
+  fi
 fi
 
 # ============================================================
@@ -137,12 +177,13 @@ if [[ -f "${bcfg}" ]]; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += net.core.wmem_default=1048576" >> "${bcfg}"
     echo "tune: network buffer sizes increased"
   fi
-  # TCP congestion control: cubic is default, but bbr might be better
-  # Note: bbr requires kernel 4.9+, RK3568 kernel may not have it
-  # if ! grep -q 'net.ipv4.tcp_congestion_control' "${bcfg}"; then
-  #   echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_congestion_control=bbr" >> "${bcfg}"
-  #   echo "tune: TCP congestion control -> bbr"
-  # fi
+  # TCP keepalive for better connection stability
+  if ! grep -q 'net.ipv4.tcp_keepalive' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_time=30" >> "${bcfg}"
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_intvl=10" >> "${bcfg}"
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += net.ipv4.tcp_keepalive_probes=5" >> "${bcfg}"
+    echo "tune: TCP keepalive optimized"
+  fi
 fi
 
 # ============================================================
@@ -157,6 +198,11 @@ if [[ -f "${bcfg}" ]]; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.deep_buffer.media=0" >> "${bcfg}"
     echo "tune: audio deep buffer disabled for media"
   fi
+  # Audio buffer size for low latency
+  if ! grep -q 'audio.offload.buffer.size' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += audio.offload.buffer.size.kb=128" >> "${bcfg}"
+    echo "tune: audio offload buffer size -> 128KB"
+  fi
 fi
 
 # ============================================================
@@ -167,10 +213,43 @@ if [[ -f "${bcfg}" ]]; then
     echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.enable=1" >> "${bcfg}"
     echo "tune: CPU boost enabled"
   fi
+  # CPU boost duration
+  if ! grep -q 'ro.cpufreq.boost.duration' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.cpufreq.boost.duration=1000" >> "${bcfg}"
+    echo "tune: CPU boost duration -> 1000ms"
+  fi
 fi
 
 # ============================================================
-# 9. Marker
+# 9. Thermal: Better cooling for sustained performance
+# ============================================================
+if [[ -f "${bcfg}" ]]; then
+  # Thermal engine thresholds (RK3568 specific)
+  if ! grep -q 'thermal.engine' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.cpu.threshold=60" >> "${bcfg}"
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += thermal.engine.gpu.threshold=55" >> "${bcfg}"
+    echo "tune: thermal thresholds adjusted"
+  fi
+fi
+
+# ============================================================
+# 10. Display: Frame rate and rendering
+# ============================================================
+if [[ -f "${bcfg}" ]]; then
+  # Force 60Hz refresh rate
+  if ! grep -q 'ro.sys.display.refresh_rate' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.display.refresh_rate=60" >> "${bcfg}"
+    echo "tune: display refresh rate -> 60Hz"
+  fi
+  # Disable adaptive refresh rate (for consistency)
+  if ! grep -q 'ro.sys.display.adaptive_refresh' "${bcfg}"; then
+    echo "TARGET_GLOBAL_PROPERTY_OVERRIDES += ro.sys.display.adaptive_refresh=0" >> "${bcfg}"
+    echo "tune: adaptive refresh rate disabled"
+  fi
+fi
+
+# ============================================================
+# 11. Marker
 # ============================================================
 if [[ -f "${bcfg}" ]]; then
   if ! grep -q '^# RADXOID_PERFORMANCE_TUNED$' "${bcfg}"; then
