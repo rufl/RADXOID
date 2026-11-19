@@ -28,10 +28,11 @@ cd "${SOURCE_DIR}"
 [[ -f build/envsetup.sh ]] || { echo "source tree is not prepared; run scripts/prepare.sh" >&2; exit 1; }
 
 # AOSP envsetup.sh references $ZSH_VERSION unguarded; incompatible with `set -u`.
+# Keep `set +u` for the entire envsetup + lunch sequence (vendor envsetup
+# internally accesses TOP and other vars that would trip `set -u`).
 set +u
 source build/envsetup.sh
 lunch "${PRODUCT_NAME}-${TARGET_BUILD_VARIANT}"
-set -u
 
 # Re-apply the same fixups that build.sh does (idempotent; no-op if already applied).
 tidy_mk="${SOURCE_DIR}/external/usb_modeswitch/usb_dongle/Android.mk"
@@ -48,6 +49,12 @@ if [[ "${ROCK3A_ENV:-rock3a}" == "lean" ]]; then
   "${ROOT_DIR}/scripts/debloat.sh"
 fi
 
-# Incremental build: mka (make with ninja) only rebuilds changed targets.
-# Full build (./build.sh) triggers kati --regen over the whole tree — slow on USB.
-mka "$@"
+# Incremental build: use `m` if defined (from envsetup.sh), else `make -j$(nproc)`
+if declare -f m >/dev/null 2>&1; then
+  m "$@"
+elif command -v make >/dev/null 2>&1; then
+  make -j"$(nproc)" "$@"
+else
+  echo "no m/make target available" >&2
+  exit 1
+fi
