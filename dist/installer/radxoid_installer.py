@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.0"
+VERSION = "v1.0.1"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -39,7 +39,7 @@ IS_MAC = PLATFORM.startswith('darwin')
 # GUI imports
 try:
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox, scrolledtext
+    from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -682,25 +682,32 @@ class RADXOIDGUI:
         self.installer.log("Volume joining completed")
         self.update_content_frame()
     
-    def select_sd_card(self):
-        """Select SD card device"""
-        device = self.installer.select_sd_card()
+    def select_gui_device(self):
+        """Store the device selected in the safe-device combobox."""
+        label = self.device_var.get()
+        device = self.device_options.get(label)
         if device:
             self.sd_card_device = device
             self.update_content_frame()
-    
+
     def run_flash(self):
-        """Run flashing"""
-        if messagebox.askyesno(
-            "Confirm",
-            f"Are you sure you want to flash to {self.sd_card_device}?\n\nThis will ERASE all data on the device!"
-        ):
-            self.installer.log(f"Starting flash to {self.sd_card_device}...")
-            result = self.installer.flash_to_sd_card(self.sd_card_device)
-            if result:
-                messagebox.showinfo("Success", "Flashing completed successfully!")
-            else:
-                messagebox.showerror("Error", "Flashing failed!")
+        """Require an exact confirmation before flashing."""
+        device = getattr(self, "sd_card_device", "")
+        expected = f"ERASE {device}"
+        typed = tk.simpledialog.askstring(
+            "Final confirmation",
+            f"This erases the whole removable disk:\n\n{device}\n\n"
+            f"Type exactly:\n{expected}",
+        )
+        if typed != expected:
+            messagebox.showerror("Cancelled", "Exact confirmation did not match.")
+            return
+        self.installer.log(f"Starting flash to {device}...")
+        result = self.installer.flash_to_sd_card(device)
+        if result:
+            messagebox.showinfo("Success", "Flashing completed successfully!")
+        else:
+            messagebox.showerror("Error", "Flashing was refused or failed.")
     
     def next_step(self):
         """Go to next step"""
