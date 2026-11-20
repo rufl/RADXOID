@@ -1,0 +1,4 @@
+a2bfc062fbb753810140cd85bfdd16e6bbe65c7c376a1fd6b4c969cfcd860ade  RADXOID-v1.0.4-rock3a-rkupdate.img
+7875b5e7e704aa07642c2c475852bb433f982015155aaf7fbead0063dad4c3c3  RADXOID-v1.0.4-rock3a-rkupdate.zip
+031a1974e52f64b7153f0b64225dec0d508735faddcffe7c0825dff15268f991  RADXOID-v1.0.4-rock3a-gpt.zip
+6e458dbd08b8469e2f5d2e8c19861c44444074b708b2bc703dbf3665feb33f3f  RADXOID-v1.0.4-rock3a-super.img
