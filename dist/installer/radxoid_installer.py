@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.6"
+VERSION = "v1.0.7"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -555,6 +555,8 @@ class RADXOIDGUI:
         
         # Installer instance
         self.installer = RADXOIDInstaller()
+        self.join_error = None
+        self.checksum_error = None
         
         # Create UI
         self.create_ui()
@@ -652,6 +654,14 @@ class RADXOIDGUI:
             anchor=tk.W
         )
         status_bar.pack(fill=tk.X, pady=(0, 10))
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(
+            main_frame,
+            variable=self.progress_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(0, 5))
         
         # Start with step 0
         self.update_content_frame()
@@ -695,10 +705,23 @@ class RADXOIDGUI:
         
         # Step 1: Verify Checksums
         elif self.current_step == 1:
+            checksum_result = getattr(self, "checksum_result", None)
+            if checksum_result is None:
+                text = (
+                    "Verifying checksums of all release assets. "
+                    "Large images may take several minutes; do not click Next."
+                )
+                color = "blue"
+            elif checksum_result:
+                text = "Checksums verified successfully. Click Next."
+                color = "green"
+            else:
+                text = f"Checksum verification failed: {self.checksum_error}"
+                color = "red"
             ttk.Label(
                 self.content_frame,
-                text="Verifying checksums of all release assets. "
-                     "Large images may take several minutes; do not click Next.",
+                text=text,
+                foreground=color,
                 padding=5,
                 wraplength=650,
             ).pack(pady=5)
@@ -730,10 +753,22 @@ class RADXOIDGUI:
         
         # Step 3: Join Volumes
         elif self.current_step == 3:
+            join_result = getattr(self, "join_result", None)
+            if join_result is None:
+                text = "Joining release assets into the output directory..."
+                color = "blue"
+            elif join_result:
+                text = "Assets joined successfully. Click Next."
+                color = "green"
+            else:
+                text = f"Volume joining failed: {self.join_error}"
+                color = "red"
             ttk.Label(
                 self.content_frame,
-                text="Joining all volumes into original files...",
+                text=text,
+                foreground=color,
                 padding=5,
+                wraplength=650,
             ).pack(pady=5)
             
             if not hasattr(self, 'join_result'):
@@ -826,7 +861,18 @@ class RADXOIDGUI:
             (self.current_step == 1 and getattr(self, "checksum_result", None) is None)
             or (self.current_step == 3 and getattr(self, "join_result", None) is None)
         )
-        self.next_button.config(state="disabled" if busy else "normal")
+        blocked = (
+            (self.current_step == 1 and getattr(self, "checksum_result", None) is not True)
+            or (self.current_step == 3 and getattr(self, "join_result", None) is not True)
+        )
+        if busy:
+            self.progress_bar.config(mode="indeterminate")
+            self.progress_bar.start(10)
+        else:
+            self.progress_bar.stop()
+            self.progress_bar.config(mode="determinate")
+            self.progress_var.set(100 if self.current_step in (1, 3) else 0)
+        self.next_button.config(state="disabled" if blocked else "normal")
 
     def _append_log(self, message):
         """Append a log message on Tk's main thread."""
@@ -873,16 +919,26 @@ class RADXOIDGUI:
         self.update_content_frame()
     
     def run_checksums(self):
-        """Run checksum verification"""
+        """Run checksum verification."""
         self.installer.log("Starting checksum verification...")
-        self.checksum_result = self.installer.verify_checksums()
+        try:
+            self.checksum_result = self.installer.verify_checksums()
+        except Exception as error:
+            self.checksum_error = str(error)
+            self.checksum_result = False
+            self.installer.log(f"Checksum verification failed: {error}", "ERROR")
         self.installer.log("Checksum verification completed")
         self.root.after(0, self.update_content_frame)
     
     def run_join(self):
-        """Run volume joining"""
+        """Run volume joining."""
         self.installer.log("Starting volume joining...")
-        self.join_result = self.installer.join_all_volumes()
+        try:
+            self.join_result = self.installer.join_all_volumes()
+        except Exception as error:
+            self.join_error = str(error)
+            self.join_result = False
+            self.installer.log(f"Volume joining failed: {error}", "ERROR")
         self.installer.log("Volume joining completed")
         self.root.after(0, self.update_content_frame)
     
@@ -925,7 +981,10 @@ class RADXOIDGUI:
                 messagebox.showerror("Error", "Checksum verification in progress...")
                 return
             if not self.checksum_result:
-                messagebox.showerror("Error", "Checksum verification failed")
+                messagebox.showerror(
+                    "Checksum verification failed",
+                    self.checksum_error or "See the installer log for details.",
+                )
                 return
         
         if self.current_step == 2 and not self.installer.output_dir:
@@ -937,9 +996,19 @@ class RADXOIDGUI:
                 messagebox.showerror("Error", "Volume joining in progress...")
                 return
             if not self.join_result:
-                messagebox.showerror("Error", "Volume joining failed")
+                messagebox.showerror(
+                    "Volume joining failed",
+                    self.join_error or "Choose an output folder outside the volumes folder.",
+                )
                 return
         
+        if self.current_step == 0:
+            self.checksum_result = None
+            self.checksum_error = None
+        elif self.current_step == 2:
+            self.join_result = None
+            self.join_error = None
+
         # Move to next step
         self.current_step += 1
         self.update_step_indicator()
