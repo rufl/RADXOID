@@ -10,6 +10,7 @@ import sys
 import subprocess
 import hashlib
 import json
+import re
 import threading
 import queue
 from pathlib import Path
@@ -281,6 +282,24 @@ class RADXOIDInstaller:
         self.log("All checksums verified successfully!")
         return True
     
+    def _device_size(self, device):
+        """Return whole-device size in bytes, or zero when unknown."""
+        if IS_MAC:
+            result = subprocess.run(
+                ["diskutil", "info", "-plist", device],
+                capture_output=True, text=True, check=False,
+            )
+            match = re.search(r"<key>DiskSize</key>\s*<real>(\d+)</real>", result.stdout)
+            return int(match.group(1)) if match else 0
+        result = subprocess.run(
+            ["lsblk", "-bno", "SIZE", device],
+            capture_output=True, text=True, check=False,
+        )
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return 0
+
     def flash_to_sd_card(self, device):
         """Flash joined image to SD card"""
         if not device:
@@ -574,40 +593,57 @@ class RADXOIDGUI:
                 padding=5
             ).pack(pady=5)
             
-            if IS_WINDOWS:
+            devices = self.installer.list_safe_devices()
+            if not devices:
                 ttk.Label(
                     self.content_frame,
-                    text="Note: On Windows, use Rufus or dd for Windows with admin privileges",
-                    foreground='orange',
+                    text="No removable writable SD-card device detected.",
+                    foreground='red',
                     padding=5
                 ).pack(pady=5)
             else:
                 ttk.Label(
                     self.content_frame,
-                    text="WARNING: This will erase the selected device!",
-                    foreground='red',
+                    text="Only removable, writable whole disks are shown. "
+                    "The system disk is excluded.",
+                    foreground='green',
                     padding=5
                 ).pack(pady=5)
-                
+                self.device_options = {item["label"]: item["path"] for item in devices}
+                self.device_var = tk.StringVar()
+                self.device_combo = ttk.Combobox(
+                    self.content_frame,
+                    textvariable=self.device_var,
+                    values=list(self.device_options),
+                    state="readonly",
+                    width=78,
+                )
+                self.device_combo.pack(pady=5)
                 ttk.Button(
                     self.content_frame,
-                    text="Select SD Card Device",
-                    command=self.select_sd_card
+                    text="Select target",
+                    command=self.select_gui_device,
                 ).pack(pady=5)
-                
-                if hasattr(self, 'sd_card_device') and self.sd_card_device:
-                    ttk.Label(
-                        self.content_frame,
-                        text=f"Selected: {self.sd_card_device}",
-                        foreground='green'
-                    ).pack(pady=5)
-                    
-                    ttk.Button(
-                        self.content_frame,
-                        text="Flash Now",
-                        command=self.run_flash,
-                        style='Danger.TButton'
-                    ).pack(pady=5)
+            
+            ttk.Label(
+                self.content_frame,
+                text="Flashing erases the selected whole disk. "
+                "Confirm by typing ERASE <device>.",
+                foreground='red',
+                padding=5
+            ).pack(pady=5)
+            
+            if hasattr(self, 'sd_card_device') and self.sd_card_device:
+                ttk.Label(
+                    self.content_frame,
+                    text=f"Selected: {self.sd_card_device}",
+                    foreground='green'
+                ).pack(pady=5)
+                ttk.Button(
+                    self.content_frame,
+                    text="Flash Now",
+                    command=self.run_flash,
+                ).pack(pady=5)
     
     def process_logs(self):
         """Process log messages from the installer"""
