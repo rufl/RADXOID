@@ -694,7 +694,7 @@ class RADXOIDGUI:
         """Require an exact confirmation before flashing."""
         device = getattr(self, "sd_card_device", "")
         expected = f"ERASE {device}"
-        typed = tk.simpledialog.askstring(
+        typed = simpledialog.askstring(
             "Final confirmation",
             f"This erases the whole removable disk:\n\n{device}\n\n"
             f"Type exactly:\n{expected}",
