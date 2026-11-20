@@ -50,7 +50,20 @@ if [[ -f "${dmk}" ]] && ! grep -q '^PRODUCT_DEXPREOPT_SPEED_APPS' "${dmk}"; then
   printf '\nPRODUCT_DEXPREOPT_SPEED_APPS += \\\n    SystemUI \\\n    Settings \\\n    Launcher3QuickStep\n' >> "${dmk}"
   echo "fixup: dexpreopt speed-profile for SystemUI/Settings/Launcher3QuickStep"
 fi
-# Fixup: recovery image grew 8 KiB past BOARD_RECOVERYIMAGE_PARTITION_SIZE
+qol_marker="# RADXOID_QOL_APPLIED"
+if [[ -f "${dmk}" ]] && ! grep -q "^${qol_marker}$" "${dmk}"; then
+  cat >> "${dmk}" <<'EOF'
+
+# RADXOID_QOL_APPLIED
+# Skip the unused Android setup wizard on this dedicated board image.
+PRODUCT_PROPERTY_OVERRIDES += ro.setupwizard.mode=DISABLED
+# Preoptimize the built-in keyboard and package installer for faster first use.
+PRODUCT_DEXPREOPT_SPEED_APPS += \
+    LatinIME \
+    PackageInstaller
+EOF
+  echo "fixup: board QOL defaults and first-use app preoptimization"
+fi
 # (kernel grew via rock_3a.config). Parameter.txt regenerates from this variable,
 rcfg="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk"
 if [[ -f "${rcfg}" ]] && grep -q '^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$' "${rcfg}"; then

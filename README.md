@@ -25,7 +25,17 @@ The RK3568 contains a Mali-G52 Bifrost GPU. The default image keeps the Rockchip
 - Removes Google GMS, telephony/TV/print/carrier packages and heavy launchers/wallpapers to minimize the system image.
 - Applies performance tuning: SCHEDUTIL CPU governor (lower jitter under sustained load), ART dexpreopt speed-profile for boot-critical apps, and 10+ additional optimization categories.
 - Keeps the Rockchip Mali-G52 userspace driver (proprietary) for best compatibility with existing emulators.
+## Daily-use quality of life
 
+The next incremental build also applies a small board-specific QOL block:
+
+- Skips the unused Android setup wizard on this dedicated image.
+- Preoptimizes `LatinIME` and `PackageInstaller` for faster first use.
+- Keeps the existing desktop defaults: no lock screen, reduced animation scales,
+  and screen-on behavior for a board normally used with HDMI/peripherals.
+
+These defaults are build-time only; they do not enable unrestricted ADB or weaken
+SELinux.
 ## Build
 
 ### Prerequisites
