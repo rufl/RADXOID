@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.8"
+VERSION = "v1.0.9"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -599,6 +599,8 @@ class RADXOIDGUI:
         # Installer instance
         self.installer = RADXOIDInstaller()
         self.operation_percent = 0.0
+        self.progress_queue = queue.Queue()
+        self.ui_log_queue = queue.Queue()
         self.checksum_cancel = threading.Event()
         self.checksum_skipped = False
         
@@ -609,6 +611,7 @@ class RADXOIDGUI:
         self.running = True
         self.log_thread = threading.Thread(target=self.process_logs, daemon=True)
         self.log_thread.start()
+        self.root.after(100, self.process_progress)
     
     def create_ui(self):
         """Create the user interface"""
@@ -929,19 +932,34 @@ class RADXOIDGUI:
         self.next_button.config(state="disabled" if blocked else "normal")
 
     def _report_progress(self, label, value):
-        """Schedule a percentage update on Tk's main thread."""
+        """Queue a percentage update from a worker thread."""
         percent = max(0.0, min(100.0, float(value)))
-        rounded = int(percent)
-        if rounded == getattr(self, "_last_progress", -1):
+        if percent - self._last_progress < 0.1 and percent < 100.0:
             return
-        self._last_progress = rounded
-        self.root.after(0, self._apply_progress, label, percent)
+        self._last_progress = percent
+        self.progress_queue.put((label, percent))
+
+    def process_progress(self):
+        """Apply queued progress updates on Tk's main thread."""
+        try:
+            while True:
+                label, percent = self.progress_queue.get_nowait()
+                self._apply_progress(label, percent)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self._append_log(self.ui_log_queue.get_nowait())
+        except queue.Empty:
+            pass
+        if getattr(self, "running", False):
+            self.root.after(100, self.process_progress)
 
     def _apply_progress(self, label, percent):
         """Update the visible progress bar and status text."""
         self.operation_percent = percent
         self.progress_var.set(percent)
-        self.status_var.set(f"{label}: {percent:.0f}%")
+        self.status_var.set(f"{label}: {percent:.1f}%")
 
     def _append_log(self, message):
         """Append a log message on Tk's main thread."""
@@ -956,7 +974,7 @@ class RADXOIDGUI:
         while self.running:
             try:
                 message = self.installer.log_queue.get(timeout=0.1)
-                self.root.after(0, self._append_log, message)
+                self.ui_log_queue.put(message)
             except queue.Empty:
                 pass
     
