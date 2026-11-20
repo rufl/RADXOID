@@ -38,7 +38,15 @@ The next incremental build also applies a small board-specific QOL block:
   and screen-on behavior for a board normally used with HDMI/peripherals.
 
 These defaults are build-time only; they do not enable unrestricted ADB or weaken
-SELinux.
+SELinux. For an already-flashed device, the reversible profile can be applied
+after ADB is connected:
+
+```bash
+./scripts/apply-device-qol.sh [adb-serial]
+```
+
+It changes only Android user settings: timeout, pointer, rotation, animations,
+notification bubbles, immersive confirmation, and stay-awake behavior.
 ## Build
 
 ### Prerequisites
