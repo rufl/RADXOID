@@ -47,11 +47,11 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name RADXOID-Installer `
             --distpath dist/out --workpath dist/work dist/installer/radxoid_installer.py
-          Rename-Item dist/out/RADXOID-Installer.exe RADXOID-Installer-windows-x86_64.exe
+          Rename-Item dist/out/RADXOID-Installer.exe dist/out/RADXOID-Installer-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: RADXOID-Installer-windows-x86_64
-          path: RADXOID-Installer-windows-x86_64.exe
+          path: dist/out/RADXOID-Installer-windows-x86_64.exe
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
