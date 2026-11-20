@@ -600,10 +600,8 @@ class RADXOIDGUI:
         self.installer = RADXOIDInstaller()
         self.operation_percent = 0.0
         self.progress_queue = queue.Queue()
-        self.ui_log_queue = queue.Queue()
-        self.checksum_cancel = threading.Event()
-        self.checksum_skipped = False
-        
+        self.checksum_started = False
+        self.join_started = False
         # Create UI
         self.create_ui()
         
@@ -779,6 +777,7 @@ class RADXOIDGUI:
             
             if not hasattr(self, 'checksum_result'):
                 self.checksum_result = None
+                self.checksum_started = True
                 threading.Thread(target=self.run_checksums, daemon=True).start()
             if checksum_result is None:
                 ttk.Button(
@@ -831,6 +830,7 @@ class RADXOIDGUI:
             
             if not hasattr(self, 'join_result'):
                 self.join_result = None
+                self.join_started = True
                 threading.Thread(target=self.run_join, daemon=True).start()
             elif self.join_result and self.installer.output_dir:
                 ttk.Button(
@@ -1117,14 +1117,15 @@ class RADXOIDGUI:
             self.checksum_error = None
             self.checksum_skipped = False
             self.checksum_cancel = threading.Event()
+            self.checksum_started = False
             self.operation_percent = 0.0
             self._last_progress = -1
         elif self.current_step == 2:
             self.join_result = None
             self.join_error = None
+            self.join_started = False
             self.operation_percent = 0.0
             self._last_progress = -1
-
         # Move to next step
         self.current_step += 1
         self.update_step_indicator()
