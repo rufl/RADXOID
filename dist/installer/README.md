@@ -38,7 +38,7 @@ Safety model:
 ### Windows
 1. Download `RADXOID-Installer.exe` from the release.
 2. Download the complete `rkupdate.img`, its `.zip` companion, and
-  `SHA256SUMS-v1.0.7.txt` into one directory.
+  `SHA256SUMS-v1.0.8.txt` into one directory.
 3. Run the installer, choose the directory, then choose an output directory.
    The `.img` is already complete; the `.zip` is not a second image part.
 4. The installer verifies both assets and writes the complete image as
@@ -80,7 +80,7 @@ RADXOID-v1.0.2/
 
 ### Join and verify
 - Select the directory containing the release assets and either
-  `SHA256SUMS.txt` or the versioned `SHA256SUMS-v1.0.7.txt` manifest.
+  `SHA256SUMS.txt` or the versioned `SHA256SUMS-v1.0.8.txt` manifest.
 - Verification fails closed if the manifest is missing, malformed, incomplete,
   contains a path, or references a missing/symlink file.
 - Complete `rkupdate.img` assets are normalized to `update.img`; `.zip`
@@ -88,6 +88,8 @@ RADXOID-v1.0.2/
 - Legacy split files named `.001`, `.002`, ... are still joined in numeric order.
 - Select an output directory outside the input directory.
 - Joined files are written through temporary files and atomically renamed.
+- SHA-256 verification can be skipped only through the explicit warning
+  confirmation; skipping removes integrity protection and is not recommended.
 
 ### Flashing
 - Windows: join only; flash `update.img` with
@@ -139,7 +141,7 @@ adb devices
 
 ### No assets found or checksum failure
 Keep the complete `.img`, optional `.zip` companion, and
-`SHA256SUMS-v1.0.7.txt` in the same directory. The `.img` and `.zip` are
+`SHA256SUMS-v1.0.8.txt` in the same directory. The `.img` and `.zip` are
 different representations of the same release asset, not two parts to
 concatenate. Redownload the manifest and assets together if a checksum fails.
 

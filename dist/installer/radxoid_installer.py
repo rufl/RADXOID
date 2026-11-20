@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.7"
+VERSION = "v1.0.8"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -234,20 +234,23 @@ class RADXOIDInstaller:
             groups[base].append(vol)
         return groups
     
-    def join_volumes(self, volumes, output_path):
+    def join_volumes(self, volumes, output_path, progress_callback=None):
         """Join split volumes into a temporary file, then atomically replace output."""
         if output_path.exists() and output_path.is_symlink():
             raise ValueError(f"Refusing symlink output: {output_path}")
         temporary = output_path.with_name(f".{output_path.name}.partial")
         self.log(f"Joining {len(volumes)} volumes into {output_path.name}")
         try:
-            with open(temporary, 'wb') as out_file:
+            with open(temporary, "wb") as out_file:
                 for vol in sorted(volumes):
                     if vol.is_symlink() or not vol.is_file():
                         raise ValueError(f"Refusing unsafe volume: {vol}")
                     self.log(f"  Reading: {vol.name}")
-                    with open(vol, 'rb') as vf:
-                        shutil.copyfileobj(vf, out_file, length=4 * 1024 * 1024)
+                    with open(vol, "rb") as vf:
+                        while chunk := vf.read(4 * 1024 * 1024):
+                            out_file.write(chunk)
+                            if progress_callback:
+                                progress_callback(len(chunk))
             os.replace(temporary, output_path)
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -255,7 +258,7 @@ class RADXOIDInstaller:
         self.log(f"Created: {output_path.name} ({output_path.stat().st_size/1024/1024:.1f}MB)")
         return True
     
-    def join_all_volumes(self):
+    def join_all_volumes(self, progress_callback=None):
         """Join split volumes and copy complete files safely."""
         if not self.volumes_dir or not self.output_dir:
             self.log("Error: Volumes or output directory not set", "ERROR")
@@ -279,14 +282,26 @@ class RADXOIDInstaller:
             self.log("Error: No distribution files found", "ERROR")
             return False
         
+        total_bytes = sum(volume.stat().st_size for volume in volumes)
+        total_bytes += sum(item.stat().st_size for item in complete_files)
+        processed_bytes = 0
+        if progress_callback:
+            progress_callback(0.0)
+
+        def advance(count):
+            nonlocal processed_bytes
+            processed_bytes += count
+            if progress_callback:
+                progress_callback(
+                    min(100.0, processed_bytes * 100.0 / total_bytes)
+                    if total_bytes else 100.0
+                )
+
         self.log(f"Joining {len(groups)} split file(s)")
         for base, vols in groups.items():
-            self.join_volumes(vols, self.output_dir / base)
+            self.join_volumes(vols, self.output_dir / base, advance)
         
         for complete_file in complete_files:
-            # GitHub releases contain the complete rkupdate image alongside
-            # compressed convenience archives. Normalize the flashable image
-            # to the name used by the Linux flashing path.
             destination_name = (
                 "update.img"
                 if complete_file.suffix.lower() == ".img"
@@ -297,13 +312,22 @@ class RADXOIDInstaller:
             if destination.exists() and destination.is_symlink():
                 raise ValueError(f"Refusing symlink output: {destination}")
             temporary = destination.with_name(f".{destination.name}.partial")
-            shutil.copyfile(complete_file, temporary)
-            os.replace(temporary, destination)
+            try:
+                with open(temporary, "wb") as out_file, open(complete_file, "rb") as source:
+                    while chunk := source.read(4 * 1024 * 1024):
+                        out_file.write(chunk)
+                        advance(len(chunk))
+                os.replace(temporary, destination)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
             self.log(f"Copied: {complete_file.name} -> {destination.name}")
         
+        if progress_callback:
+            progress_callback(100.0)
         return True
     
-    def verify_checksums(self):
+    def verify_checksums(self, progress_callback=None, cancel_event=None):
         """Verify SHA256 checksums and reject unsafe manifest paths."""
         candidates = (
             "SHA256SUMS.txt",
@@ -325,8 +349,7 @@ class RADXOIDInstaller:
             )
             return False
 
-        self.log("Verifying checksums...")
-        verified = 0
+        entries = []
         with open(checksums_file, "r", encoding="utf-8") as checksums:
             for line in checksums:
                 line = line.strip()
@@ -336,7 +359,6 @@ class RADXOIDInstaller:
                 if len(parts) != 2:
                     self.log(f"Error: Invalid checksum entry: {line}", "ERROR")
                     return False
-
                 expected_hash, filename = parts
                 if (
                     len(expected_hash) != 64
@@ -350,21 +372,42 @@ class RADXOIDInstaller:
                 if not filepath.is_file() or filepath.is_symlink():
                     self.log(f"Error: Missing or unsafe file: {filename}", "ERROR")
                     return False
+                entries.append((expected_hash, filename, filepath))
 
-                sha256 = hashlib.sha256()
-                with open(filepath, "rb") as source:
-                    while chunk := source.read(4 * 1024 * 1024):
-                        sha256.update(chunk)
-
-                if sha256.hexdigest().lower() != expected_hash.lower():
-                    self.log(f"Error: {filename} (checksum mismatch)", "ERROR")
-                    return False
-                verified += 1
-                self.log(f"  OK {filename}")
-
-        if not verified:
-            self.log("Error: SHA256SUMS.txt contains no entries", "ERROR")
+        if not entries:
+            self.log("Error: checksum manifest contains no entries", "ERROR")
             return False
+
+        total_bytes = sum(filepath.stat().st_size for _, _, filepath in entries)
+        processed_bytes = 0
+        if progress_callback:
+            progress_callback(0.0)
+        self.log("Verifying checksums...")
+        for expected_hash, filename, filepath in entries:
+            if cancel_event and cancel_event.is_set():
+                self.log("WARNING: SHA-256 verification skipped by user", "WARNING")
+                return True
+            sha256 = hashlib.sha256()
+            with open(filepath, "rb") as source:
+                while chunk := source.read(4 * 1024 * 1024):
+                    if cancel_event and cancel_event.is_set():
+                        self.log("WARNING: SHA-256 verification skipped by user", "WARNING")
+                        return True
+                    sha256.update(chunk)
+                    processed_bytes += len(chunk)
+                    if progress_callback:
+                        progress_callback(
+                            min(100.0, processed_bytes * 100.0 / total_bytes)
+                            if total_bytes else 100.0
+                        )
+
+            if sha256.hexdigest().lower() != expected_hash.lower():
+                self.log(f"Error: {filename} (checksum mismatch)", "ERROR")
+                return False
+            self.log(f"  OK {filename}")
+
+        if progress_callback:
+            progress_callback(100.0)
         self.log("All checksums verified successfully!")
         return True
 
@@ -555,8 +598,9 @@ class RADXOIDGUI:
         
         # Installer instance
         self.installer = RADXOIDInstaller()
-        self.join_error = None
-        self.checksum_error = None
+        self.operation_percent = 0.0
+        self.checksum_cancel = threading.Event()
+        self.checksum_skipped = False
         
         # Create UI
         self.create_ui()
@@ -706,12 +750,16 @@ class RADXOIDGUI:
         # Step 1: Verify Checksums
         elif self.current_step == 1:
             checksum_result = getattr(self, "checksum_result", None)
+            percent = int(self.operation_percent)
             if checksum_result is None:
                 text = (
-                    "Verifying checksums of all release assets. "
-                    "Large images may take several minutes; do not click Next."
+                    f"Verifying checksums: {percent}% complete. "
+                    "Large images may take several minutes."
                 )
                 color = "blue"
+            elif self.checksum_skipped:
+                text = "SHA-256 verification skipped. Click Next to continue."
+                color = "darkorange"
             elif checksum_result:
                 text = "Checksums verified successfully. Click Next."
                 color = "green"
@@ -729,6 +777,12 @@ class RADXOIDGUI:
             if not hasattr(self, 'checksum_result'):
                 self.checksum_result = None
                 threading.Thread(target=self.run_checksums, daemon=True).start()
+            if checksum_result is None:
+                ttk.Button(
+                    self.content_frame,
+                    text="Skip SHA-256 verification (unsafe)",
+                    command=self.skip_checksums,
+                ).pack(pady=5)
         
         # Step 2: Select Output Directory
         elif self.current_step == 2:
@@ -754,8 +808,9 @@ class RADXOIDGUI:
         # Step 3: Join Volumes
         elif self.current_step == 3:
             join_result = getattr(self, "join_result", None)
+            percent = int(self.operation_percent)
             if join_result is None:
-                text = "Joining release assets into the output directory..."
+                text = f"Joining release assets: {percent}% complete."
                 color = "blue"
             elif join_result:
                 text = "Assets joined successfully. Click Next."
@@ -865,14 +920,28 @@ class RADXOIDGUI:
             (self.current_step == 1 and getattr(self, "checksum_result", None) is not True)
             or (self.current_step == 3 and getattr(self, "join_result", None) is not True)
         )
-        if busy:
-            self.progress_bar.config(mode="indeterminate")
-            self.progress_bar.start(10)
+        self.progress_bar.stop()
+        self.progress_bar.config(mode="determinate")
+        if self.current_step in (1, 3):
+            self.progress_var.set(self.operation_percent)
         else:
-            self.progress_bar.stop()
-            self.progress_bar.config(mode="determinate")
-            self.progress_var.set(100 if self.current_step in (1, 3) else 0)
+            self.progress_var.set(0)
         self.next_button.config(state="disabled" if blocked else "normal")
+
+    def _report_progress(self, label, value):
+        """Schedule a percentage update on Tk's main thread."""
+        percent = max(0.0, min(100.0, float(value)))
+        rounded = int(percent)
+        if rounded == getattr(self, "_last_progress", -1):
+            return
+        self._last_progress = rounded
+        self.root.after(0, self._apply_progress, label, percent)
+
+    def _apply_progress(self, label, percent):
+        """Update the visible progress bar and status text."""
+        self.operation_percent = percent
+        self.progress_var.set(percent)
+        self.status_var.set(f"{label}: {percent:.0f}%")
 
     def _append_log(self, message):
         """Append a log message on Tk's main thread."""
@@ -918,11 +987,32 @@ class RADXOIDGUI:
         self.sd_card_device = ""
         self.update_content_frame()
     
+    def skip_checksums(self):
+        """Skip checksum verification only after explicit confirmation."""
+        confirmed = messagebox.askyesno(
+            "Skip SHA-256 verification?",
+            "This bypasses integrity verification. Continue only if the "
+            "files came from the official RADXOID release.",
+        )
+        if not confirmed:
+            return
+        self.checksum_skipped = True
+        self.checksum_cancel.set()
+        self.checksum_result = True
+        self.operation_percent = 100.0
+        self.installer.log("WARNING: SHA-256 verification skipped by user", "WARNING")
+        self.root.after(0, self.update_content_frame)
+
     def run_checksums(self):
         """Run checksum verification."""
         self.installer.log("Starting checksum verification...")
         try:
-            self.checksum_result = self.installer.verify_checksums()
+            self.checksum_result = self.installer.verify_checksums(
+                progress_callback=lambda value: self._report_progress("SHA-256", value),
+                cancel_event=self.checksum_cancel,
+            )
+            if self.checksum_cancel.is_set():
+                self.checksum_skipped = True
         except Exception as error:
             self.checksum_error = str(error)
             self.checksum_result = False
@@ -934,7 +1024,9 @@ class RADXOIDGUI:
         """Run volume joining."""
         self.installer.log("Starting volume joining...")
         try:
-            self.join_result = self.installer.join_all_volumes()
+            self.join_result = self.installer.join_all_volumes(
+                progress_callback=lambda value: self._report_progress("Join", value),
+            )
         except Exception as error:
             self.join_error = str(error)
             self.join_result = False
@@ -1005,9 +1097,15 @@ class RADXOIDGUI:
         if self.current_step == 0:
             self.checksum_result = None
             self.checksum_error = None
+            self.checksum_skipped = False
+            self.checksum_cancel = threading.Event()
+            self.operation_percent = 0.0
+            self._last_progress = -1
         elif self.current_step == 2:
             self.join_result = None
             self.join_error = None
+            self.operation_percent = 0.0
+            self._last_progress = -1
 
         # Move to next step
         self.current_step += 1
