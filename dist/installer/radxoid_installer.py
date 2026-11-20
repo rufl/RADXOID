@@ -97,57 +97,85 @@ class RADXOIDInstaller:
         self.log(f"Selected output directory: {self.output_dir}")
         return True
     
-    def select_sd_card(self):
-        """Select SD card device"""
+    def list_safe_devices(self):
+        """Return removable, writable whole-disk targets."""
         if IS_WINDOWS:
-            # Windows: List physical drives
-            try:
-                result = subprocess.run(
-                    ['wmic', 'diskdrive', 'list', 'brief'],
-                    capture_output=True, text=True
-                )
-                drives = [line.split()[0] for line in result.stdout.strip().split('\n')[1:]]
-                self.log("Available drives:")
-                for i, drive in enumerate(drives):
-                    self.log(f"  {i+1}. {drive}")
-                
-                if GUI_AVAILABLE:
-                    # Show dialog in GUI
-                    return None  # Will be handled by GUI
-                else:
-                    choice = input("Select drive number: ")
-                    return drives[int(choice)-1]
-            except Exception as e:
-                self.log(f"Error listing drives: {e}", "ERROR")
-                return None
-        
-        elif IS_LINUX or IS_MAC:
-            # Linux/macOS: List block devices
-            try:
-                result = subprocess.run(
-                    ['lsblk', '-d', '-n', '-o', 'NAME,SIZE,MODEL'],
-                    capture_output=True, text=True
-                )
-                devices = []
-                for line in result.stdout.strip().split('\n'):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        devices.append(parts[0])
-                
-                self.log("Available block devices:")
-                for i, device in enumerate(devices):
-                    self.log(f"  {i+1}. /dev/{device}")
-                
-                if GUI_AVAILABLE:
-                    return None  # Will be handled by GUI
-                else:
-                    choice = input("Select device number (e.g., sdb): ")
-                    return f"/dev/{devices[int(choice)-1]}"
-            except Exception as e:
-                self.log(f"Error listing devices: {e}", "ERROR")
-                return None
-        
-        return None
+            script = (
+                "Get-Disk | Where-Object { $_.BusType -in @('USB','SD') "
+                "-and -not $_.IsBoot -and -not $_.IsSystem -and "
+                "-not $_.IsReadOnly } | "
+                "Select-Object Number,Size,Model,BusType | ConvertTo-Json -Compress"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return []
+            data = json.loads(result.stdout)
+            if isinstance(data, dict):
+                data = [data]
+            return [
+                {
+                    "path": f"\\\\.\\PhysicalDrive{item['Number']}",
+                    "label": f"\\\\.\\PhysicalDrive{item['Number']} | "
+                    f"{item.get('Size', 0) / 1024**3:.1f} GiB | "
+                    f"{item.get('Model', '').strip()} | {item.get('BusType', '')}",
+                    "size": int(item.get("Size", 0)),
+                }
+                for item in data
+            ]
+
+        if not (IS_LINUX or IS_MAC):
+            return []
+        result = subprocess.run(
+            ["lsblk", "--json", "-o",
+             "PATH,NAME,TYPE,SIZE,MODEL,RM,RO,TRAN,MOUNTPOINTS"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return []
+        root_source = subprocess.run(
+            ["findmnt", "-n", "-o", "SOURCE", "/"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        data = json.loads(result.stdout).get("blockdevices", [])
+        devices = []
+        for item in data:
+            path = item.get("path")
+            mountpoints = [p for p in item.get("mountpoints", []) if p]
+            removable = str(item.get("rm", "0")) == "1"
+            transport = (item.get("tran") or "").lower()
+            if (
+                item.get("type") == "disk"
+                and path
+                and not item.get("ro")
+                and not mountpoints
+                and path != root_source
+                and (removable or transport in {"usb", "mmc", "sd"})
+            ):
+                devices.append({
+                    "path": path,
+                    "label": f"{path} | {item.get('size', '')} | "
+                    f"{(item.get('model') or '').strip()} | {transport or 'unknown'}",
+                    "size": 0,
+                })
+        return devices
+
+    def select_sd_card(self):
+        """Select a safe whole-disk target in CLI mode."""
+        devices = self.list_safe_devices()
+        if not devices:
+            self.log("No removable writable SD-card device found", "ERROR")
+            return None
+        for index, device in enumerate(devices, 1):
+            self.log(f"  {index}. {device['label']}")
+        try:
+            selected = int(input("Select target number: ")) - 1
+            return devices[selected]["path"]
+        except (ValueError, IndexError):
+            self.log("Invalid target selection", "ERROR")
+            return None
     
     def list_volumes(self):
         """List split volume files with numeric suffixes."""
@@ -267,51 +295,48 @@ class RADXOIDInstaller:
         self.log(f"Flashing {image_file.name} to {device}")
         
         if IS_WINDOWS:
-            # Windows: Use dd for Windows
-            self.log("Flashing (Windows)...")
-            try:
-                # Note: This is a placeholder - actual Windows flashing requires admin
-                self.log("Note: On Windows, use Rufus or dd for Windows with admin privileges")
-                self.log(f"Command: dd if={image_file} of={device} bs=1M --progress")
-                return True
-            except Exception as e:
-                self.log(f"Error: {e}", "ERROR")
-                return False
+            self.log(
+                "Windows raw flashing is disabled for safety. "
+                "Use Etcher/Rufus with the joined update.img.",
+                "ERROR",
+            )
+            return False
         
-        else:
-            # Linux/macOS: Use dd
-            self.log("Flashing (Linux/macOS)...")
-            self.log(f"WARNING: This will erase {device}!")
-            
-            try:
-                cmd = [
-                    'sudo', 'dd',
-                    f'if={image_file}',
-                    f'of={device}',
-                    'bs=4M',
-                    'status=progress',
-                    'oflag=sync'
-                ]
-                
-                # For macOS, use rdisk instead of disk
-                if IS_MAC and device.startswith('/dev/disk'):
-                    device = device.replace('/dev/disk', '/dev/rdisk')
-                    cmd[3] = device
-                
-                self.log(f"Executing: {' '.join(cmd)}")
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                
-                if result.returncode == 0:
-                    self.log("Flashing completed successfully!")
-                    self.log("Waiting for sync...")
-                    subprocess.run(['sync'])
-                    return True
-                else:
-                    self.log(f"Error: {result.stderr}", "ERROR")
-                    return False
-            except Exception as e:
-                self.log(f"Error: {e}", "ERROR")
-                return False
+        safe_paths = {item["path"] for item in self.list_safe_devices()}
+        if device not in safe_paths:
+            self.log("Refusing target: it is not a detected removable disk", "ERROR")
+            return False
+        if image_file.stat().st_size > self._device_size(device):
+            self.log("Refusing target: SD card is smaller than update.img", "ERROR")
+            return False
+        
+        # Linux/macOS: use dd only after the removable-disk checks above.
+        self.log("Flashing Linux/macOS whole-disk target...")
+        self.log(f"WARNING: This will erase {device}!")
+        
+        try:
+            target = device
+            if IS_MAC and target.startswith('/dev/disk'):
+                target = target.replace('/dev/disk', '/dev/rdisk')
+            cmd = [
+                'sudo', 'dd',
+                f'if={image_file}',
+                f'of={target}',
+                'bs=4M',
+                'status=progress',
+                'oflag=sync',
+            ]
+            self.log(f"Executing: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                self.log("Flashing completed successfully!")
+                subprocess.run(['sync'], check=False)
+                return True
+            self.log(f"Error: {result.stderr}", "ERROR")
+            return False
+        except Exception as e:
+            self.log(f"Error: {e}", "ERROR")
+            return False
     
     def run(self):
         """Run the installer"""
