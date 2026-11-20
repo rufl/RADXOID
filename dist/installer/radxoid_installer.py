@@ -13,6 +13,7 @@ import json
 import threading
 import queue
 from pathlib import Path
+import shutil
 from datetime import datetime
 
 # Check if we're running as a PyInstaller bundle
@@ -149,17 +150,15 @@ class RADXOIDInstaller:
         return None
     
     def list_volumes(self):
-        """List all volume files"""
+        """List split volume files with numeric suffixes."""
         if not self.volumes_dir:
             return []
         
-        volumes = []
-        for vol_file in self.volumes_dir.glob("*.*"):
-            if vol_file.is_file() and vol_file.name.count('.') > 1:
-                # This is a volume file (e.g., update.img.001)
-                volumes.append(vol_file)
-        
-        return sorted(volumes)
+        return sorted(
+            volume
+            for volume in self.volumes_dir.iterdir()
+            if volume.is_file() and volume.name.rsplit(".", 1)[-1].isdigit()
+        )
     
     def group_volumes_by_base(self, volumes):
         """Group volumes by base filename"""
@@ -186,22 +185,31 @@ class RADXOIDInstaller:
         return True
     
     def join_all_volumes(self):
-        """Join all volumes in the directory"""
+        """Join split volumes and copy complete files into the output directory."""
         if not self.volumes_dir or not self.output_dir:
             self.log("Error: Volumes or output directory not set", "ERROR")
             return False
         
         volumes = self.list_volumes()
-        if not volumes:
-            self.log("Error: No volume files found", "ERROR")
+        groups = self.group_volumes_by_base(volumes)
+        complete_files = [
+            item for item in self.volumes_dir.iterdir()
+            if item.is_file()
+            and item.name != "SHA256SUMS.txt"
+            and not item.name.rsplit(".", 1)[-1].isdigit()
+        ]
+        
+        if not groups and not complete_files:
+            self.log("Error: No distribution files found", "ERROR")
             return False
         
-        groups = self.group_volumes_by_base(volumes)
-        
-        self.log(f"Found {len(groups)} files to join")
+        self.log(f"Joining {len(groups)} split file(s)")
         for base, vols in groups.items():
-            output_path = self.output_dir / base
-            self.join_volumes(vols, output_path)
+            self.join_volumes(vols, self.output_dir / base)
+        
+        for complete_file in complete_files:
+            shutil.copy2(complete_file, self.output_dir / complete_file.name)
+            self.log(f"Copied: {complete_file.name}")
         
         return True
     
@@ -251,14 +259,11 @@ class RADXOIDInstaller:
             self.log("Error: No SD card device selected", "ERROR")
             return False
         
-        # Find the largest joined file (probably update.img)
-        joined_files = list(self.output_dir.glob("*"))
-        if not joined_files:
-            self.log("Error: No joined files found", "ERROR")
+        # Only update.img is a complete flashable board image.
+        image_file = self.output_dir / "update.img"
+        if not image_file.is_file():
+            self.log("Error: Joined update.img not found", "ERROR")
             return False
-        
-        # Sort by size, get largest
-        image_file = max(joined_files, key=lambda f: f.stat().st_size)
         self.log(f"Flashing {image_file.name} to {device}")
         
         if IS_WINDOWS:
@@ -408,8 +413,8 @@ class RADXOIDGUI:
         self.update_step_indicator()
         
         # Main content frame
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.content_frame = ttk.Frame(main_frame)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
         # Log text
         self.log_text = scrolledtext.ScrolledText(

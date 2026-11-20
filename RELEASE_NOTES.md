@@ -277,3 +277,20 @@ ROCK3A_ENV=lean ./scripts/build-incremental.sh
 
 *Release v1.0.0 - 2026-11-19*
 *Build: RK356X_ROCK_3A_R_USERDEBUG_RK3568-ROCK-3A_ENG.RADXA.20261119.110506*
+
+## 📦 Multi-volume distribution and GUI installer
+
+GitHub release assets are limited to files below 2 GB. The 4.39 GB `gpt.img` is therefore distributed as:
+
+- `gpt.img.001`
+- `gpt.img.002`
+- `gpt.img.003`
+
+`update.img` and `super.img` remain complete files because each is below the limit. `RADXOID-Installer` joins numbered volumes, copies complete assets, verifies `SHA256SUMS.txt`, and writes **only `update.img`** to the selected SD card. It does not flash `gpt.img` or `super.img` directly.
+
+Platforms:
+
+- Linux: `RADXOID-Installer` executable
+- Windows: `installer.py` plus `build_windows.bat` to produce `RADXOID-Installer.exe`
+
+Use `INSTALLER_README.md` for the workflow and device-safety notes.

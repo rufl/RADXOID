@@ -8,26 +8,21 @@ This package contains **RADXOID v1.0.0** split into multiple volumes to comply w
 
 ## 📚 Package Structure
 
-```
 RADXOID-v1.0.0/
-├── installer/
-│   ├── windows/
-│   │   ├── RADXOID-Installer.exe      # GUI Installer for Windows
-│   │   └── install.ps1                 # PowerShell script
-│   ├── linux/
-│   │   ├── RADXOID-Installer           # GUI Installer for Linux (AppImage)
-│   │   └── install.sh                  # Bash script
-│   └── common/
-│       ├── split_volumes.py            # Split files into volumes
-│       └── join_volumes.py             # Join volumes back
+├── installer.py                         # Cross-platform GUI source
+├── build_windows.bat                    # Build Windows executable
+├── build_linux.sh                        # Build Linux executable
 ├── volumes/
-│   ├── update.img.001                  # Volume 1 of update.img
-│   ├── update.img.002                  # Volume 2 of update.img
-│   ├── super.img.001                  # Volume 1 of super.img
-│   ├── super.img.002                  # Volume 2 of super.img
-│   └── SHA256SUMS.txt                 # Checksums of all volumes
-├── README.md                           # This file
-└── LICENSE                             # License
+│   ├── update.img                       # Complete flashable image
+│   ├── super.img                        # Dynamic partitions
+│   ├── gpt.img.001                      # GPT volume 1
+│   ├── gpt.img.002                      # GPT volume 2
+│   ├── gpt.img.003                      # GPT volume 3
+│   └── SHA256SUMS.txt                   # Checksums
+├── README.md                            # This file
+├── INSTALLER_README.md                  # Installer details
+├── RELEASE_NOTES.md                     # Release notes
+└── GITHUB_RELEASE_GUIDE.md              # Publishing guide
 ```
 
 ---
