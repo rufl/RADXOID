@@ -64,6 +64,13 @@ PRODUCT_DEXPREOPT_SPEED_APPS += \
 EOF
   echo "fixup: board QOL defaults and first-use app preoptimization"
 fi
+settings_overlay="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/overlay/frameworks/base/packages/SettingsProvider/res/values/defaults.xml"
+if [[ -f "${settings_overlay}" ]] && ! grep -q 'RADXOID_QOL_SETTINGS_APPLIED' "${settings_overlay}"; then
+  sed -i '/<\/resources>/i\
+    <!-- RADXOID_QOL_SETTINGS_APPLIED: comfortable HDMI mouse default. -->\
+    <integer name="def_pointer_speed">1</integer>' "${settings_overlay}"
+  echo "fixup: default USB/HDMI pointer speed -> 1"
+fi
 # (kernel grew via rock_3a.config). Parameter.txt regenerates from this variable,
 rcfg="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk"
 if [[ -f "${rcfg}" ]] && grep -q '^BOARD_RECOVERYIMAGE_PARTITION_SIZE := 114552832$' "${rcfg}"; then
