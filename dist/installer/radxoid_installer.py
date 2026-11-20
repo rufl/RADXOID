@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.2"
+VERSION = "v1.0.3"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -707,19 +707,30 @@ class RADXOIDGUI:
             ttk.Label(
                 self.content_frame,
                 text="Joining all volumes into original files...",
-                padding=5
+                padding=5,
             ).pack(pady=5)
             
             if not hasattr(self, 'join_result'):
                 self.join_result = None
                 threading.Thread(target=self.run_join, daemon=True).start()
+            elif self.join_result and self.installer.output_dir:
+                ttk.Button(
+                    self.content_frame,
+                    text="Open output folder",
+                    command=self.open_output,
+                ).pack(pady=10)
         
         # Step 4: Flash to SD Card
         elif self.current_step == 4:
             ttk.Label(
                 self.content_frame,
                 text="Flash the joined image to SD card",
-                padding=5
+                padding=5,
+            ).pack(pady=5)
+            ttk.Button(
+                self.content_frame,
+                text="Refresh SD-card list",
+                command=self.refresh_devices,
             ).pack(pady=5)
             
             if IS_WINDOWS:
@@ -807,6 +818,23 @@ class RADXOIDGUI:
         """Browse for output directory"""
         if self.installer.select_output_dir():
             self.update_content_frame()
+    def open_output(self):
+        """Open the joined-file directory in the platform file manager."""
+        output_dir = self.installer.output_dir
+        if not output_dir:
+            return
+        try:
+            if IS_WINDOWS:
+                os.startfile(str(output_dir))
+            else:
+                subprocess.Popen(["xdg-open", str(output_dir)])
+        except (OSError, AttributeError) as error:
+            self.installer.log(f"Could not open output directory: {error}", "WARNING")
+
+    def refresh_devices(self):
+        """Refresh the removable SD-card list after insertion or removal."""
+        self.sd_card_device = ""
+        self.update_content_frame()
     
     def run_checksums(self):
         """Run checksum verification"""
@@ -928,7 +956,7 @@ def main():
                         
                         # Ask if user wants to flash
                         if IS_WINDOWS:
-                            print("\nNote: On Windows, use Rufus or dd for Windows with admin privileges")
+                            print("\nNote: Windows joins only. Flash update.img with Rufus or Etcher.")
                         else:
                             device = installer.select_sd_card()
                             if device:

@@ -27,8 +27,8 @@ Safety model:
 - **Download**: From [GitHub Releases](https://github.com/rufl/RADXOID/releases)
 
 ### Linux
-- **AppImage**: `RADXOID-Installer` (standalone)
-- **Requirements**: Linux kernel 3.0+, FUSE (for AppImage)
+- **Executable**: `RADXOID-Installer-linux-x86_64` (standalone binary)
+- **Requirements**: Linux with `lsblk`, `findmnt`, `udevadm`, and `sudo`
 - **Download**: From [GitHub Releases](https://github.com/rufl/RADXOID/releases)
 
 ---
@@ -54,21 +54,20 @@ Safety model:
 
 ## 📁 File Structure
 
+```text
 RADXOID-v1.0.2/
 ├── installer/
 │   ├── windows/
-│   │   └── RADXOID-Installer.exe      # Windows GUI installer
+│   │   └── RADXOID-Installer.exe
 │   ├── linux/
-│   │   └── RADXOID-Installer           # Linux GUI installer (AppImage)
-│   └── README.md                       # This file
+│   │   └── RADXOID-Installer-linux-x86_64
+│   └── README.md
 ├── volumes/
-│   ├── update.img.001                  # Volume 1
-│   ├── update.img.002                  # Volume 2 (if needed)
-│   ├── super.img.001                   # Volume 1
-│   ├── super.img.002                   # Volume 2 (if needed)
-│   └── SHA256SUMS.txt                  # Checksums
-├── README.md                           # Main README
-└── LICENSE                             # License
+│   ├── update.img.001
+│   ├── update.img.002
+│   └── SHA256SUMS.txt
+├── README.md
+└── RELEASE_NOTES_v1.0.2.md
 ```
 
 ---
