@@ -1,19 +1,21 @@
 # RADXOID Installer
 
-## 📦 Cross-Platform Installer for RADXOID
+## Safe SD-card installer
 
-This installer provides a **graphical user interface (GUI)** for joining split volumes and flashing RADXOID to an SD card on **Windows** and **Linux**.
+This GUI joins RADXOID split volumes and verifies their SHA-256 manifest before
+creating `update.img`. It supports Windows and Linux.
 
----
+Safety model:
 
-## 🎯 Features
-
-- **Cross-platform**: Works on Windows and Linux
-- **GUI Interface**: Easy-to-use graphical interface
-- **Volume Joining**: Automatically joins split volumes
-- **Checksum Verification**: Verifies file integrity
-- **SD Card Flashing**: Direct flashing to SD card (Linux)
-- **Progress Tracking**: Shows operation progress
+- The input manifest is mandatory; checksum paths must be plain filenames.
+- Symlinks are rejected for inputs, outputs, and checksum entries.
+- Output cannot be inside the input volume directory.
+- Linux lists only writable whole disks identified as SD media; system and
+  mounted disks are excluded.
+- Linux requires an exact `ERASE /dev/...` confirmation, unmounts target
+  partitions, checks capacity, writes only `update.img`, then verifies the
+  written prefix by SHA-256.
+- Windows never performs raw-disk writes. Use Rufus or Etcher after joining.
 
 ---
 
@@ -34,23 +36,25 @@ This installer provides a **graphical user interface (GUI)** for joining split v
 ## 🚀 Quick Start
 
 ### Windows
-1. **Download** `RADXOID-Installer.exe`
-2. **Download** all volume files (`.001`, `.002`, etc.)
-3. **Run** the installer
-4. **Follow** the GUI instructions
+1. Download `RADXOID-Installer.exe` from the release.
+2. Download all volume files and `SHA256SUMS.txt` into one directory.
+3. Run the installer, choose the volumes directory, and choose an output directory.
+4. Verify the generated `update.img` with Rufus or Etcher. The installer does
+   not erase or write disks on Windows.
 
 ### Linux
-1. **Download** `RADXOID-Installer` (AppImage)
-2. **Make executable**: `chmod +x RADXOID-Installer`
-3. **Run**: `./RADXOID-Installer`
-4. **Follow** the GUI instructions
+1. Download `RADXOID-Installer-linux-x86_64`.
+2. Make it executable: `chmod +x RADXOID-Installer-linux-x86_64`.
+3. Run it as a normal user; `sudo` is requested only for unmount, write, and verify.
+4. Insert the SD card, select the detected whole disk, and type the exact
+   confirmation shown by the GUI.
+5. Do not remove power or the card until post-write verification finishes.
 
 ---
 
 ## 📁 File Structure
 
-```
-RADXOID-v1.0.0/
+RADXOID-v1.0.2/
 ├── installer/
 │   ├── windows/
 │   │   └── RADXOID-Installer.exe      # Windows GUI installer
@@ -69,88 +73,39 @@ RADXOID-v1.0.0/
 
 ---
 
-## 🔧 Building from Source
 
-### Prerequisites
-- Python 3.8+
-- PyInstaller: `pip install PyInstaller`
-- (Optional) linuxdeploy for AppImage
+## 📚 Usage and security behavior
 
-### Windows
-```bash
-# Run the build script
-cd dist/installer
-build_windows.bat
+### Join and verify
+- Select the directory containing every volume and `SHA256SUMS.txt`.
+- Verification fails closed if the manifest is missing, malformed, incomplete,
+  contains a path, or references a missing/symlink file.
+- Select an output directory outside the volumes directory.
+- Joined files are written through temporary files and atomically renamed.
 
-# Output: build/windows/RADXOID-Installer.exe
-```
-
-### Linux
-```bash
-# Make build script executable
-chmod +x build_linux.sh
-
-# Run the build script
-cd dist/installer
-./build_linux.sh
-
-# Output: build/linux/RADXOID-Installer
-```
-
-### Create AppImage (Optional)
-```bash
-# Download linuxdeploy
-wget https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-chmod +x linuxdeploy-x86_64.AppImage
-
-# Create AppImage
-./linuxdeploy-x86_64.AppImage build/linux/RADXOID-Installer -o build/linux/
-```
+### Flashing
+- Windows: join only; flash `update.img` with
+  [Rufus](https://rufus.ie/) or [balenaEtcher](https://etcher.balena.io/).
+- Linux: only whole, writable SD disks are offered. Root disks, mounted disks,
+  partitions, USB disks, and unknown media are not offered.
+- The selected disk is revalidated immediately before writing. Its partitions
+  are unmounted, capacity is checked, and the image-sized region is read back
+  and hashed after `dd`.
+- Flashing destroys all data on the selected SD card. Back up first.
 
 ---
 
-## 📚 Usage
+## 🛠️ Building from source
 
-### Step 1: Select Volumes Directory
-- Browse to the directory containing the volume files (`.001`, `.002`, etc.)
-- The installer will automatically detect all volume files
+Prerequisites: Python 3.8+ and PyInstaller (`python -m pip install pyinstaller`).
 
-### Step 2: Verify Checksums
-- The installer will verify the SHA256 checksums of all volume files
-- This ensures file integrity before joining
+```bash
+cd dist/installer
+pyinstaller --onefile --windowed --name RADXOID-Installer radxoid_installer.py
+```
 
-### Step 3: Select Output Directory
-- Choose where to save the joined files
-- The installer will create the original files from the volumes
-
-### Step 4: Join Volumes
-- The installer will join all volumes into their original files
-- Progress will be shown in the log
-
-### Step 5: Flash to SD Card (Optional)
-- **Windows**: The installer will show instructions for using Rufus or dd
-- **Linux**: The installer can directly flash to the SD card
-
----
-
-## ⚠️ Important Notes
-
-### Windows
-- **Admin Rights**: Flashing requires administrator privileges
-- **Rufus Recommended**: Use [Rufus](https://rufus.ie/) for best results
-- **dd for Windows**: Alternative if you prefer command line
-
-### Linux
-- **Root Required**: Flashing requires root/sudo privileges
-- **Device Selection**: Be careful to select the correct device
-- **Data Loss**: Flashing will **ERASE ALL DATA** on the selected device
-
-### Both Platforms
-- **Backup**: Always backup your data before flashing
-- **SD Card**: Use a quality Class 10 or UHS-I SD card
-- **Power**: Ensure stable power during flashing
-- **Patience**: Flashing may take several minutes
-
+The repository workflow builds signed-by-GitHub-release Linux and Windows
+executables for every `v*` tag. The Linux executable is not an AppImage.
 ---
 
 ## 🎮 After Installation
@@ -176,39 +131,25 @@ adb devices
 
 ## 🐛 Troubleshooting
 
-### "No volumes found"
-- **Solution**: Ensure all volume files are in the selected directory
-- **Check**: Files should be named like `update.img.001`, `update.img.002`, etc.
+### No volumes found or checksum failure
+Keep all `.001`, `.002`, ... files and `SHA256SUMS.txt` in the same directory.
+Download the release again if a checksum does not match.
 
-### "Checksum verification failed"
-- **Solution**: Download all files again
-- **Check**: Ensure all files were downloaded completely
+### No SD card shown on Linux
+The installer intentionally rejects USB readers, mounted media, partitions,
+the system disk, read-only disks, and media whose SD identity cannot be proven.
+Check `lsblk --json` and insert a physical SD card directly or through a reader
+that exposes SD transport information.
 
-### "Device not found" (Linux)
-- **Solution**: Check if the SD card is inserted
-- **Check**: Run `lsblk` to see available devices
+### Permission denied or sudo timeout
+Install `sudo`, keep the session local, and ensure your account may unmount and
+write removable media. The installer does not silently fall back to unsafe writes.
 
-### "Permission denied" (Linux)
-- **Solution**: Run the installer with sudo or as root
-- **Check**: The installer needs root for flashing
-
-### "Not enough space"
-- **Solution**: Free up space on the output directory
-- **Check**: Joined files require ~10GB of free space
-
+### Not enough space
+The output directory needs space for the joined files. The target SD card must
+be at least as large as `update.img`.
 ---
 
-## 📊 Performance
-
-### Volume Joining
-- **Speed**: ~100-200MB/s (depends on disk)
-- **Time**: ~1-2 minutes for all files
-
-### Flashing
-- **Speed**: ~20-50MB/s (depends on SD card)
-- **Time**: ~5-10 minutes for full image
-
----
 
 ## 🤝 Support
 
@@ -226,4 +167,4 @@ adb devices
 
 ---
 
-*RADXOID Installer v1.0.0 - 2026-11-19*
+*RADXOID Installer v1.0.2*

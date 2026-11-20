@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.1"
+VERSION = "v1.0.2"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -98,11 +98,41 @@ class RADXOIDInstaller:
         self.log(f"Selected output directory: {self.output_dir}")
         return True
     
+    def _has_mountpoints(self, node):
+        """Return true when a disk or any child partition is mounted."""
+        if any(point for point in node.get("mountpoints", []) if point):
+            return True
+        return any(self._has_mountpoints(child) for child in node.get("children", []))
+
+    def _is_root_ancestor(self, device, root_source):
+        """Return true when device contains the mounted root filesystem."""
+        if not root_source:
+            return False
+        result = subprocess.run(
+            ["lsblk", "-s", "-n", "-o", "PATH", device],
+            capture_output=True, text=True, check=False,
+        )
+        return root_source in result.stdout.split()
+
+    def _udev_properties(self, device):
+        if IS_MAC:
+            return {}
+        result = subprocess.run(
+            ["udevadm", "info", "--query=property", "--name", device],
+            capture_output=True, text=True, check=False,
+        )
+        properties = {}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                properties[key] = value
+        return properties
+
     def list_safe_devices(self):
-        """Return removable, writable whole-disk targets."""
+        """Return removable SD-card whole disks that are writable and unmounted."""
         if IS_WINDOWS:
             script = (
-                "Get-Disk | Where-Object { $_.BusType -in @('USB','SD') "
+                "Get-Disk | Where-Object { $_.BusType -eq 'SD' "
                 "-and -not $_.IsBoot -and -not $_.IsSystem -and "
                 "-not $_.IsReadOnly } | "
                 "Select-Object Number,Size,Model,BusType | ConvertTo-Json -Compress"
@@ -121,17 +151,17 @@ class RADXOIDInstaller:
                     "path": f"\\\\.\\PhysicalDrive{item['Number']}",
                     "label": f"\\\\.\\PhysicalDrive{item['Number']} | "
                     f"{item.get('Size', 0) / 1024**3:.1f} GiB | "
-                    f"{item.get('Model', '').strip()} | {item.get('BusType', '')}",
+                    f"{item.get('Model', '').strip()} | SD",
                     "size": int(item.get("Size", 0)),
                 }
                 for item in data
             ]
 
-        if not (IS_LINUX or IS_MAC):
+        if not IS_LINUX:
             return []
         result = subprocess.run(
             ["lsblk", "--json", "-o",
-             "PATH,NAME,TYPE,SIZE,MODEL,RM,RO,TRAN,MOUNTPOINTS"],
+             "PATH,NAME,TYPE,SIZE,RM,RO,TRAN,MOUNTPOINTS"],
             capture_output=True, text=True, check=False,
         )
         if result.returncode != 0:
@@ -144,22 +174,24 @@ class RADXOIDInstaller:
         devices = []
         for item in data:
             path = item.get("path")
-            mountpoints = [p for p in item.get("mountpoints", []) if p]
-            removable = str(item.get("rm", "0")) == "1"
-            transport = (item.get("tran") or "").lower()
+            mounted = self._has_mountpoints(item)
+            props = self._udev_properties(path) if path else {}
+            is_sd_media = (
+                (item.get("tran") or "").lower() in {"mmc", "sd"}
+                or props.get("ID_DRIVE_FLASH_SD") == "1"
+            )
             if (
                 item.get("type") == "disk"
                 and path
                 and not item.get("ro")
-                and not mountpoints
-                and path != root_source
-                and (removable or transport in {"usb", "mmc", "sd"})
+                and not mounted
+                and not self._is_root_ancestor(path, root_source)
+                and is_sd_media
             ):
                 devices.append({
                     "path": path,
-                    "label": f"{path} | {item.get('size', '')} | "
-                    f"{(item.get('model') or '').strip()} | {transport or 'unknown'}",
-                    "size": 0,
+                    "label": f"{path} | {item.get('size', '')} | SD",
+                    "size": self._device_size(path),
                 })
         return devices
 
@@ -186,7 +218,9 @@ class RADXOIDInstaller:
         return sorted(
             volume
             for volume in self.volumes_dir.iterdir()
-            if volume.is_file() and volume.name.rsplit(".", 1)[-1].isdigit()
+            if volume.is_file()
+            and not volume.is_symlink()
+            and volume.name.rsplit(".", 1)[-1].isdigit()
         )
     
     def group_volumes_by_base(self, volumes):
@@ -201,22 +235,35 @@ class RADXOIDInstaller:
         return groups
     
     def join_volumes(self, volumes, output_path):
-        """Join volume files into original file"""
+        """Join split volumes into a temporary file, then atomically replace output."""
+        if output_path.exists() and output_path.is_symlink():
+            raise ValueError(f"Refusing symlink output: {output_path}")
+        temporary = output_path.with_name(f".{output_path.name}.partial")
         self.log(f"Joining {len(volumes)} volumes into {output_path.name}")
-        
-        with open(output_path, 'wb') as out_file:
-            for vol in sorted(volumes):
-                self.log(f"  Reading: {vol.name}")
-                with open(vol, 'rb') as vf:
-                    out_file.write(vf.read())
-        
-        self.log(f"  Created: {output_path.name} ({output_path.stat().st_size/1024/1024:.1f}MB)")
+        try:
+            with open(temporary, 'wb') as out_file:
+                for vol in sorted(volumes):
+                    if vol.is_symlink() or not vol.is_file():
+                        raise ValueError(f"Refusing unsafe volume: {vol}")
+                    self.log(f"  Reading: {vol.name}")
+                    with open(vol, 'rb') as vf:
+                        shutil.copyfileobj(vf, out_file, length=4 * 1024 * 1024)
+            os.replace(temporary, output_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        self.log(f"Created: {output_path.name} ({output_path.stat().st_size/1024/1024:.1f}MB)")
         return True
     
     def join_all_volumes(self):
-        """Join split volumes and copy complete files into the output directory."""
+        """Join split volumes and copy complete files safely."""
         if not self.volumes_dir or not self.output_dir:
             self.log("Error: Volumes or output directory not set", "ERROR")
+            return False
+        volumes_root = self.volumes_dir.resolve()
+        output_root = self.output_dir.resolve()
+        if output_root == volumes_root or volumes_root in output_root.parents:
+            self.log("Error: Output directory cannot be inside volumes directory", "ERROR")
             return False
         
         volumes = self.list_volumes()
@@ -224,10 +271,10 @@ class RADXOIDInstaller:
         complete_files = [
             item for item in self.volumes_dir.iterdir()
             if item.is_file()
+            and not item.is_symlink()
             and item.name != "SHA256SUMS.txt"
             and not item.name.rsplit(".", 1)[-1].isdigit()
         ]
-        
         if not groups and not complete_files:
             self.log("Error: No distribution files found", "ERROR")
             return False
@@ -237,51 +284,66 @@ class RADXOIDInstaller:
             self.join_volumes(vols, self.output_dir / base)
         
         for complete_file in complete_files:
-            shutil.copy2(complete_file, self.output_dir / complete_file.name)
+            destination = self.output_dir / complete_file.name
+            if destination.exists() and destination.is_symlink():
+                raise ValueError(f"Refusing symlink output: {destination}")
+            temporary = destination.with_name(f".{destination.name}.partial")
+            shutil.copyfile(complete_file, temporary)
+            os.replace(temporary, destination)
             self.log(f"Copied: {complete_file.name}")
         
         return True
     
     def verify_checksums(self):
-        """Verify SHA256 checksums"""
+        """Verify SHA256 checksums and reject unsafe manifest paths."""
         checksums_file = self.volumes_dir / "SHA256SUMS.txt"
-        if not checksums_file.exists():
-            self.log("Warning: No checksums file found", "WARNING")
-            return True
-        
+        if not checksums_file.is_file() or checksums_file.is_symlink():
+            self.log("Error: SHA256SUMS.txt is required", "ERROR")
+            return False
+
         self.log("Verifying checksums...")
-        with open(checksums_file, 'r') as f:
-            for line in f:
+        verified = 0
+        with open(checksums_file, "r", encoding="utf-8") as checksums:
+            for line in checksums:
                 line = line.strip()
                 if not line:
                     continue
-                
                 parts = line.split("  ", 1)
                 if len(parts) != 2:
-                    continue
-                
+                    self.log(f"Error: Invalid checksum entry: {line}", "ERROR")
+                    return False
+
                 expected_hash, filename = parts
+                if (
+                    len(expected_hash) != 64
+                    or any(char not in "0123456789abcdefABCDEF" for char in expected_hash)
+                    or Path(filename).name != filename
+                    or Path(filename).is_absolute()
+                ):
+                    self.log(f"Error: Unsafe checksum filename: {filename}", "ERROR")
+                    return False
                 filepath = self.volumes_dir / filename
-                
-                if not filepath.exists():
-                    self.log(f"Error: Missing file: {filename}", "ERROR")
+                if not filepath.is_file() or filepath.is_symlink():
+                    self.log(f"Error: Missing or unsafe file: {filename}", "ERROR")
                     return False
-                
+
                 sha256 = hashlib.sha256()
-                with open(filepath, 'rb') as f:
-                    while chunk := f.read(8192):
+                with open(filepath, "rb") as source:
+                    while chunk := source.read(4 * 1024 * 1024):
                         sha256.update(chunk)
-                
-                actual_hash = sha256.hexdigest()
-                if actual_hash == expected_hash:
-                    self.log(f"  ✅ {filename}")
-                else:
-                    self.log(f"  ❌ {filename} (checksum mismatch)", "ERROR")
+
+                if sha256.hexdigest().lower() != expected_hash.lower():
+                    self.log(f"Error: {filename} (checksum mismatch)", "ERROR")
                     return False
-        
+                verified += 1
+                self.log(f"  OK {filename}")
+
+        if not verified:
+            self.log("Error: SHA256SUMS.txt contains no entries", "ERROR")
+            return False
         self.log("All checksums verified successfully!")
         return True
-    
+
     def _device_size(self, device):
         """Return whole-device size in bytes, or zero when unknown."""
         if IS_MAC:
@@ -300,62 +362,129 @@ class RADXOIDInstaller:
         except ValueError:
             return 0
 
+    def _unmount_partitions(self, device):
+        """Unmount only mounted child partitions of the already-approved disk."""
+        result = subprocess.run(
+            ["lsblk", "--json", "-o", "PATH,TYPE,MOUNTPOINTS", device],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            self.log("Error: Could not inspect target partitions", "ERROR")
+            return False
+        try:
+            tree = json.loads(result.stdout).get("blockdevices", [])
+        except json.JSONDecodeError:
+            self.log("Error: Invalid partition information", "ERROR")
+            return False
+
+        partitions = []
+        def visit(nodes):
+            for node in nodes:
+                if node.get("type") != "disk":
+                    partitions.extend(
+                        mountpoint for mountpoint in node.get("mountpoints", []) if mountpoint
+                    )
+                visit(node.get("children", []))
+        visit(tree)
+        for mountpoint in partitions:
+            result = subprocess.run(
+                ["sudo", "umount", "--", mountpoint],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                self.log(f"Error: Could not unmount {mountpoint}: {result.stderr.strip()}", "ERROR")
+                return False
+        return True
+
+    def _hash_file(self, path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as source:
+            while chunk := source.read(4 * 1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _hash_device_prefix(self, device, size):
+        """Hash exactly the image-sized prefix of a raw device."""
+        block_size = 4 * 1024 * 1024
+        count = (size + block_size - 1) // block_size
+        process = subprocess.Popen(
+            ["sudo", "dd", f"if={device}", "bs=4M", f"count={count}", "status=none"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        digest = hashlib.sha256()
+        remaining = size
+        while remaining:
+            chunk = process.stdout.read(min(block_size, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        _, stderr = process.communicate()
+        if process.returncode != 0 or remaining:
+            self.log(f"Error: Could not verify written data: {stderr.decode(errors='replace').strip()}", "ERROR")
+            return None
+        return digest.hexdigest()
+
     def flash_to_sd_card(self, device):
-        """Flash joined image to SD card"""
+        """Flash joined image to a freshly revalidated Linux SD-card target."""
         if not device:
             self.log("Error: No SD card device selected", "ERROR")
             return False
-        
-        # Only update.img is a complete flashable board image.
         image_file = self.output_dir / "update.img"
-        if not image_file.is_file():
-            self.log("Error: Joined update.img not found", "ERROR")
+        if not image_file.is_file() or image_file.is_symlink():
+            self.log("Error: Joined update.img not found or unsafe", "ERROR")
             return False
-        self.log(f"Flashing {image_file.name} to {device}")
-        
-        if IS_WINDOWS:
+        if not IS_LINUX:
             self.log(
-                "Windows raw flashing is disabled for safety. "
-                "Use Etcher/Rufus with the joined update.img.",
+                "Raw flashing is disabled on this platform. "
+                "Use Etcher or Rufus with the joined update.img.",
                 "ERROR",
             )
             return False
-        
-        safe_paths = {item["path"] for item in self.list_safe_devices()}
-        if device not in safe_paths:
-            self.log("Refusing target: it is not a detected removable disk", "ERROR")
+        if shutil.which("sudo") is None:
+            self.log("Error: sudo is required for Linux flashing", "ERROR")
             return False
-        if image_file.stat().st_size > self._device_size(device):
+
+        safe_devices = {item["path"]: item for item in self.list_safe_devices()}
+        selected = safe_devices.get(device)
+        if not selected:
+            self.log("Refusing target: it is not a detected removable SD disk", "ERROR")
+            return False
+        image_size = image_file.stat().st_size
+        initial_size = selected["size"]
+        if not initial_size or image_size > initial_size:
             self.log("Refusing target: SD card is smaller than update.img", "ERROR")
             return False
-        
-        # Linux/macOS: use dd only after the removable-disk checks above.
-        self.log("Flashing Linux/macOS whole-disk target...")
-        self.log(f"WARNING: This will erase {device}!")
-        
+        if not self._unmount_partitions(device):
+            return False
+        current_size = self._device_size(device)
+        if current_size != initial_size:
+            self.log("Refusing target: device identity or size changed", "ERROR")
+            return False
+
+        self.log(f"Flashing {image_file.name} to {device}")
+        self.log(f"WARNING: This erases the whole SD disk {device}!")
         try:
-            target = device
-            if IS_MAC and target.startswith('/dev/disk'):
-                target = target.replace('/dev/disk', '/dev/rdisk')
             cmd = [
-                'sudo', 'dd',
-                f'if={image_file}',
-                f'of={target}',
-                'bs=4M',
-                'status=progress',
-                'oflag=sync',
+                "sudo", "dd", f"if={image_file}", f"of={device}",
+                "bs=4M", "status=progress", "oflag=sync",
             ]
-            self.log(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.log("Flashing completed successfully!")
-                subprocess.run(['sync'], check=False)
-                return True
-            self.log(f"Error: {result.stderr}", "ERROR")
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                self.log(f"Error: {result.stderr.strip()}", "ERROR")
+                return False
+            subprocess.run(["sync"], check=False)
+            expected_hash = self._hash_file(image_file)
+            actual_hash = self._hash_device_prefix(device, image_size)
+            if actual_hash != expected_hash:
+                self.log("Error: Post-write verification failed", "ERROR")
+                return False
+            self.log("Flashing and post-write verification completed successfully!")
+            return True
+        except Exception as error:
+            self.log(f"Error: {error}", "ERROR")
             return False
-        except Exception as e:
-            self.log(f"Error: {e}", "ERROR")
-            return False
+    
     
     def run(self):
         """Run the installer"""
@@ -420,7 +549,7 @@ class RADXOIDGUI:
         # Title
         title_label = ttk.Label(
             main_frame,
-            text=f"RADXOID v{VERSION} Installer",
+            text=f"RADXOID {VERSION} Installer",
             font=('Helvetica', 16, 'bold')
         )
         title_label.pack(pady=10)
@@ -462,7 +591,7 @@ class RADXOIDGUI:
         
         # Log text
         self.log_text = scrolledtext.ScrolledText(
-            content_frame,
+            self.content_frame,
             wrap=tk.WORD,
             height=15,
             state='disabled'
@@ -593,58 +722,69 @@ class RADXOIDGUI:
                 padding=5
             ).pack(pady=5)
             
+            if IS_WINDOWS:
+                ttk.Label(
+                    self.content_frame,
+                    text="Windows does not raw-flash disks. Use Rufus or Etcher "
+                    "with the joined update.img.",
+                    foreground="blue",
+                    padding=5,
+                    wraplength=650,
+                ).pack(pady=20)
+                return
+
             devices = self.installer.list_safe_devices()
             if not devices:
                 ttk.Label(
                     self.content_frame,
                     text="No removable writable SD-card device detected.",
-                    foreground='red',
-                    padding=5
+                    foreground="red",
+                    padding=5,
                 ).pack(pady=5)
-            else:
-                ttk.Label(
-                    self.content_frame,
-                    text="Only removable, writable whole disks are shown. "
-                    "The system disk is excluded.",
-                    foreground='green',
-                    padding=5
-                ).pack(pady=5)
-                self.device_options = {item["label"]: item["path"] for item in devices}
-                self.device_var = tk.StringVar()
-                self.device_combo = ttk.Combobox(
-                    self.content_frame,
-                    textvariable=self.device_var,
-                    values=list(self.device_options),
-                    state="readonly",
-                    width=78,
-                )
-                self.device_combo.pack(pady=5)
-                ttk.Button(
-                    self.content_frame,
-                    text="Select target",
-                    command=self.select_gui_device,
-                ).pack(pady=5)
-            
+                return
+
+            ttk.Label(
+                self.content_frame,
+                text="Only removable, writable SD whole disks are shown. "
+                "System and mounted disks are excluded.",
+                foreground="green",
+                padding=5,
+                wraplength=650,
+            ).pack(pady=5)
+            self.device_options = {item["label"]: item["path"] for item in devices}
+            self.device_var = tk.StringVar()
+            self.device_combo = ttk.Combobox(
+                self.content_frame,
+                textvariable=self.device_var,
+                values=list(self.device_options),
+                state="readonly",
+                width=78,
+            )
+            self.device_combo.pack(pady=5)
+            ttk.Button(
+                self.content_frame,
+                text="Select target",
+                command=self.select_gui_device,
+            ).pack(pady=5)
             ttk.Label(
                 self.content_frame,
                 text="Flashing erases the selected whole disk. "
                 "Confirm by typing ERASE <device>.",
-                foreground='red',
-                padding=5
+                foreground="red",
+                padding=5,
+                wraplength=650,
             ).pack(pady=5)
-            
-            if hasattr(self, 'sd_card_device') and self.sd_card_device:
+            if getattr(self, "sd_card_device", ""):
                 ttk.Label(
                     self.content_frame,
                     text=f"Selected: {self.sd_card_device}",
-                    foreground='green'
+                    foreground="green",
                 ).pack(pady=5)
                 ttk.Button(
                     self.content_frame,
                     text="Flash Now",
                     command=self.run_flash,
                 ).pack(pady=5)
-    
     def process_logs(self):
         """Process log messages from the installer"""
         while self.running:
