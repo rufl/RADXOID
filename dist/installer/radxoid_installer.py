@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.4"
+VERSION = "v1.0.5"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
