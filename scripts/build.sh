@@ -68,8 +68,10 @@ settings_overlay="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/overlay/
 if [[ -f "${settings_overlay}" ]] && ! grep -q 'RADXOID_QOL_SETTINGS_APPLIED' "${settings_overlay}"; then
   sed -i '/<\/resources>/i\
     <!-- RADXOID_QOL_SETTINGS_APPLIED: comfortable HDMI mouse default. -->\
-    <integer name="def_pointer_speed">1</integer>' "${settings_overlay}"
-  echo "fixup: default USB/HDMI pointer speed -> 1"
+    <integer name="def_pointer_speed">1</integer>\
+    <bool name="def_notification_pulse">false</bool>\
+    <bool name="def_notification_bubbles">false</bool>' "${settings_overlay}"
+  echo "fixup: pointer speed -> 1; notification pulse/bubbles disabled"
 fi
 # (kernel grew via rock_3a.config). Parameter.txt regenerates from this variable,
 rcfg="${SOURCE_DIR}/device/rockchip/rk356x/rk356x_rock_3a_r/BoardConfig.mk"

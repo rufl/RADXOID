@@ -32,6 +32,8 @@ The next incremental build also applies a small board-specific QOL block:
 - Skips the unused Android setup wizard on this dedicated image.
 - Preoptimizes `LatinIME` and `PackageInstaller` for faster first use.
 - Uses a comfortable default USB/HDMI mouse pointer speed.
+- Disables notification bubbles and notification LED/pulse noise for focused
+  HDMI gaming sessions.
 - Keeps the existing desktop defaults: no lock screen, reduced animation scales,
   and screen-on behavior for a board normally used with HDMI/peripherals.
 
