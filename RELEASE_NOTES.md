@@ -269,7 +269,7 @@ ROCK3A_ENV=lean ./scripts/build-incremental.sh
 - [x] Quick Wins documented
 - [x] GitHub repository updated
 - [x] Release notes created
-- [ ] GitHub Release published
+- [x] GitHub Release published
 - [ ] Hardware testing completed
 - [ ] Performance benchmarks measured
 
