@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.5"
+VERSION = "v1.0.6"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -697,8 +697,10 @@ class RADXOIDGUI:
         elif self.current_step == 1:
             ttk.Label(
                 self.content_frame,
-                text="Verifying checksums of all volume files...",
-                padding=5
+                text="Verifying checksums of all release assets. "
+                     "Large images may take several minutes; do not click Next.",
+                padding=5,
+                wraplength=650,
             ).pack(pady=5)
             
             if not hasattr(self, 'checksum_result'):
@@ -820,16 +822,26 @@ class RADXOIDGUI:
                     text="Flash Now",
                     command=self.run_flash,
                 ).pack(pady=5)
+        busy = (
+            (self.current_step == 1 and getattr(self, "checksum_result", None) is None)
+            or (self.current_step == 3 and getattr(self, "join_result", None) is None)
+        )
+        self.next_button.config(state="disabled" if busy else "normal")
+
+    def _append_log(self, message):
+        """Append a log message on Tk's main thread."""
+        self.log_text.config(state='normal')
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state='disabled')
+        self.status_var.set(message.split(']')[-1].strip())
+
     def process_logs(self):
-        """Process log messages from the installer"""
+        """Process log messages from the installer."""
         while self.running:
             try:
                 message = self.installer.log_queue.get(timeout=0.1)
-                self.log_text.config(state='normal')
-                self.log_text.insert(tk.END, message + "\n")
-                self.log_text.see(tk.END)
-                self.log_text.config(state='disabled')
-                self.status_var.set(message.split(']')[-1].strip())
+                self.root.after(0, self._append_log, message)
             except queue.Empty:
                 pass
     
@@ -865,14 +877,14 @@ class RADXOIDGUI:
         self.installer.log("Starting checksum verification...")
         self.checksum_result = self.installer.verify_checksums()
         self.installer.log("Checksum verification completed")
-        self.update_content_frame()
+        self.root.after(0, self.update_content_frame)
     
     def run_join(self):
         """Run volume joining"""
         self.installer.log("Starting volume joining...")
         self.join_result = self.installer.join_all_volumes()
         self.installer.log("Volume joining completed")
-        self.update_content_frame()
+        self.root.after(0, self.update_content_frame)
     
     def select_gui_device(self):
         """Store the device selected in the safe-device combobox."""
