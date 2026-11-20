@@ -37,10 +37,13 @@ Safety model:
 
 ### Windows
 1. Download `RADXOID-Installer.exe` from the release.
-2. Download all volume files and `SHA256SUMS.txt` into one directory.
-3. Run the installer, choose the volumes directory, and choose an output directory.
-4. Verify the generated `update.img` with Rufus or Etcher. The installer does
-   not erase or write disks on Windows.
+2. Download the complete `rkupdate.img`, its `.zip` companion, and
+   `SHA256SUMS-v1.0.4.txt` into one directory.
+3. Run the installer, choose the directory, then choose an output directory.
+   The `.img` is already complete; the `.zip` is not a second image part.
+4. The installer verifies both assets and writes the complete image as
+   `update.img`. Use Rufus or Etcher with that file.
+5. Windows never erases or writes disks through this installer.
 
 ### Linux
 1. Download `RADXOID-Installer-linux-x86_64`.
@@ -76,10 +79,14 @@ RADXOID-v1.0.2/
 ## 📚 Usage and security behavior
 
 ### Join and verify
-- Select the directory containing every volume and `SHA256SUMS.txt`.
+- Select the directory containing the release assets and either
+  `SHA256SUMS.txt` or the versioned `SHA256SUMS-v1.0.4.txt` manifest.
 - Verification fails closed if the manifest is missing, malformed, incomplete,
   contains a path, or references a missing/symlink file.
-- Select an output directory outside the volumes directory.
+- Complete `rkupdate.img` assets are normalized to `update.img`; `.zip`
+  companions are verified and copied, never concatenated as image volumes.
+- Legacy split files named `.001`, `.002`, ... are still joined in numeric order.
+- Select an output directory outside the input directory.
 - Joined files are written through temporary files and atomically renamed.
 
 ### Flashing
@@ -130,9 +137,11 @@ adb devices
 
 ## 🐛 Troubleshooting
 
-### No volumes found or checksum failure
-Keep all `.001`, `.002`, ... files and `SHA256SUMS.txt` in the same directory.
-Download the release again if a checksum does not match.
+### No assets found or checksum failure
+Keep the complete `.img`, optional `.zip` companion, and
+`SHA256SUMS-v1.0.4.txt` in the same directory. The `.img` and `.zip` are
+different representations of the same release asset, not two parts to
+concatenate. Redownload the manifest and assets together if a checksum fails.
 
 ### No SD card shown on Linux
 The installer intentionally rejects USB readers, mounted media, partitions,

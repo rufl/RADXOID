@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.3"
+VERSION = "v1.0.4"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -272,7 +272,7 @@ class RADXOIDInstaller:
             item for item in self.volumes_dir.iterdir()
             if item.is_file()
             and not item.is_symlink()
-            and item.name != "SHA256SUMS.txt"
+            and not item.name.startswith("SHA256SUMS")
             and not item.name.rsplit(".", 1)[-1].isdigit()
         ]
         if not groups and not complete_files:
@@ -284,21 +284,45 @@ class RADXOIDInstaller:
             self.join_volumes(vols, self.output_dir / base)
         
         for complete_file in complete_files:
-            destination = self.output_dir / complete_file.name
+            # GitHub releases contain the complete rkupdate image alongside
+            # compressed convenience archives. Normalize the flashable image
+            # to the name used by the Linux flashing path.
+            destination_name = (
+                "update.img"
+                if complete_file.suffix.lower() == ".img"
+                and "rkupdate" in complete_file.stem.lower()
+                else complete_file.name
+            )
+            destination = self.output_dir / destination_name
             if destination.exists() and destination.is_symlink():
                 raise ValueError(f"Refusing symlink output: {destination}")
             temporary = destination.with_name(f".{destination.name}.partial")
             shutil.copyfile(complete_file, temporary)
             os.replace(temporary, destination)
-            self.log(f"Copied: {complete_file.name}")
+            self.log(f"Copied: {complete_file.name} -> {destination.name}")
         
         return True
     
     def verify_checksums(self):
         """Verify SHA256 checksums and reject unsafe manifest paths."""
-        checksums_file = self.volumes_dir / "SHA256SUMS.txt"
-        if not checksums_file.is_file() or checksums_file.is_symlink():
-            self.log("Error: SHA256SUMS.txt is required", "ERROR")
+        candidates = (
+            "SHA256SUMS.txt",
+            f"SHA256SUMS-{VERSION}.txt",
+        )
+        checksums_file = next(
+            (
+                self.volumes_dir / name
+                for name in candidates
+                if (self.volumes_dir / name).is_file()
+                and not (self.volumes_dir / name).is_symlink()
+            ),
+            None,
+        )
+        if checksums_file is None:
+            self.log(
+                "Error: SHA256SUMS.txt or the versioned SHA256SUMS manifest is required",
+                "ERROR",
+            )
             return False
 
         self.log("Verifying checksums...")
