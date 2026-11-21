@@ -1,5 +1,23 @@
 # RADXOID Changelog
 
+## [v1.0.19] - Win32 I/O without the C runtime
+
+### Fixed
+- Keeps the successful `CreateFileW` physical-disk handle entirely in Win32
+  instead of passing it to `msvcrt.open_osfhandle`, which produced the observed
+  `[Errno 13] Permission denied`.
+- Writes with `WriteFile`, reads back with `ReadFile`, flushes with
+  `FlushFileBuffers`, and closes with `CloseHandle`.
+
+### Performance
+- Reuses one 4 MiB buffer for decompression, hashing, writing, and readback
+  instead of allocating a new bytes object for every block.
+
+### Verification
+- Exercises native `CreateFileW`/`WriteFile`/`ReadFile`/`FlushFileBuffers`/
+  `CloseHandle` behavior without any CRT file descriptor.
+
+
 ## [v1.0.18] - Native Windows raw-disk access
 
 ### Fixed

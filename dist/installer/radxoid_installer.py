@@ -6,6 +6,7 @@ Supports Windows and Linux
 """
 
 import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import os
@@ -20,12 +21,86 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.18"
+VERSION = "v1.0.19"
 
 # Platform detection
 PLATFORM = sys.platform
 IS_WINDOWS = PLATFORM.startswith('win')
 IS_LINUX = PLATFORM.startswith('linux')
+
+class _WindowsRawDevice:
+    """Minimal unbuffered file object backed only by Win32 device APIs."""
+
+    def __init__(self, kernel32, handle, path, writable):
+        self._kernel32 = kernel32
+        self._handle = handle
+        self._path = path
+        self._writable = writable
+        self._closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exception_type, _exception, _traceback):
+        self.close()
+
+    def _raise_last_error(self, operation):
+        error_code = ctypes.get_last_error()
+        detail = ctypes.FormatError(error_code).strip()
+        raise OSError(
+            error_code,
+            f"{operation} failed for {self._path}: {detail}",
+        )
+
+    def readinto(self, buffer):
+        if self._closed:
+            raise ValueError("I/O operation on closed raw device")
+        view = memoryview(buffer).cast("B")
+        if view.readonly:
+            raise TypeError("readinto requires a writable buffer")
+        raw_buffer = (ctypes.c_char * len(view)).from_buffer(view)
+        bytes_read = wintypes.DWORD()
+        if not self._kernel32.ReadFile(
+            self._handle,
+            raw_buffer,
+            len(view),
+            ctypes.byref(bytes_read),
+            None,
+        ):
+            self._raise_last_error("ReadFile")
+        return bytes_read.value
+
+    def write(self, buffer):
+        if self._closed:
+            raise ValueError("I/O operation on closed raw device")
+        if not self._writable:
+            raise OSError(f"Raw device is read-only: {self._path}")
+        view = memoryview(buffer).cast("B")
+        if view.readonly:
+            raise TypeError("WriteFile requires a writable buffer")
+        raw_buffer = (ctypes.c_char * len(view)).from_buffer(view)
+        bytes_written = wintypes.DWORD()
+        if not self._kernel32.WriteFile(
+            self._handle,
+            raw_buffer,
+            len(view),
+            ctypes.byref(bytes_written),
+            None,
+        ):
+            self._raise_last_error("WriteFile")
+        return bytes_written.value
+
+    def flush(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed raw device")
+        if self._writable and not self._kernel32.FlushFileBuffers(self._handle):
+            self._raise_last_error("FlushFileBuffers")
+
+    def close(self):
+        if not self._closed:
+            self._kernel32.CloseHandle(self._handle)
+            self._closed = True
+
 
 # GUI imports
 try:
@@ -635,12 +710,9 @@ class RADXOIDInstaller:
         return int(match.group(1)) if match else None
 
     def _open_windows_device(self, device, writable):
-        """Open a physical disk with the native Windows raw-device contract."""
+        """Open a physical disk without passing its handle through the CRT."""
         if self._windows_disk_number(device) is None:
             raise ValueError(f"Invalid Windows physical-disk path: {device}")
-
-        import msvcrt
-        from ctypes import wintypes
 
         generic_read = 0x80000000
         generic_write = 0x40000000
@@ -651,8 +723,7 @@ class RADXOIDInstaller:
         file_flag_write_through = 0x80000000
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        create_file = kernel32.CreateFileW
-        create_file.argtypes = [
+        kernel32.CreateFileW.argtypes = [
             wintypes.LPCWSTR,
             wintypes.DWORD,
             wintypes.DWORD,
@@ -661,13 +732,31 @@ class RADXOIDInstaller:
             wintypes.DWORD,
             wintypes.HANDLE,
         ]
-        create_file.restype = wintypes.HANDLE
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.ReadFile.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        ]
+        kernel32.ReadFile.restype = wintypes.BOOL
+        kernel32.WriteFile.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        ]
+        kernel32.WriteFile.restype = wintypes.BOOL
+        kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+        kernel32.FlushFileBuffers.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
 
         access = generic_read | (generic_write if writable else 0)
         attributes = file_flag_write_through if writable else file_attribute_normal
-        handle = create_file(
+        handle = kernel32.CreateFileW(
             device,
             access,
             file_share_read | file_share_write,
@@ -684,23 +773,7 @@ class RADXOIDInstaller:
                 error_code,
                 f"CreateFileW could not open {device} for raw {action}: {detail}",
             )
-
-        flags = os.O_RDWR if writable else os.O_RDONLY
-        flags |= getattr(os, "O_BINARY", 0)
-        try:
-            descriptor = msvcrt.open_osfhandle(handle, flags)
-        except Exception:
-            kernel32.CloseHandle(handle)
-            raise
-        try:
-            return os.fdopen(
-                descriptor,
-                "r+b" if writable else "rb",
-                buffering=0,
-            )
-        except Exception:
-            os.close(descriptor)
-            raise
+        return _WindowsRawDevice(kernel32, handle, device, writable)
 
     def _open_device(self, device, writable=False):
         if IS_WINDOWS:
@@ -712,22 +785,6 @@ class RADXOIDInstaller:
         target.flush()
         if not IS_WINDOWS:
             os.fsync(target.fileno())
-            return
-
-        import msvcrt
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
-        kernel32.FlushFileBuffers.restype = wintypes.BOOL
-        handle = msvcrt.get_osfhandle(target.fileno())
-        if not kernel32.FlushFileBuffers(handle):
-            error_code = ctypes.get_last_error()
-            detail = ctypes.FormatError(error_code).strip()
-            raise OSError(
-                error_code,
-                f"FlushFileBuffers failed for the SD card: {detail}",
-            )
 
     def _dismount_windows(self, device):
         number = self._windows_disk_number(device)
@@ -781,14 +838,17 @@ class RADXOIDInstaller:
         )
 
         if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
+            buffer = bytearray(block_size)
+            buffer_view = memoryview(buffer)
             with self._open_device(device) as source:
                 while remaining:
-                    chunk = source.read(min(block_size, remaining))
-                    if not chunk:
+                    requested = min(block_size, remaining)
+                    read = source.readinto(buffer_view[:requested])
+                    if not read:
                         break
-                    digest.update(chunk)
-                    processed += len(chunk)
-                    remaining -= len(chunk)
+                    digest.update(buffer_view[:read])
+                    processed += read
+                    remaining -= read
                     self._emit_flash_progress(
                         progress_callback,
                         phase,
@@ -857,15 +917,20 @@ class RADXOIDInstaller:
             archive.open(image_info) as source,
             self._open_device(device, writable=True) as target,
         ):
-            while chunk := source.read(4 * 1024 * 1024):
+            if IS_WINDOWS:
+                self.log("Raw disk handle opened; writing with Win32 WriteFile")
+            buffer = bytearray(4 * 1024 * 1024)
+            buffer_view = memoryview(buffer)
+            while read := source.readinto(buffer_view):
+                chunk = buffer_view[:read]
                 digest.update(chunk)
-                view = memoryview(chunk)
+                view = chunk
                 while view:
                     written = target.write(view)
                     if not written:
                         raise OSError(f"Short write to {device}")
                     view = view[written:]
-                processed += len(chunk)
+                processed += read
                 self._emit_flash_progress(
                     progress_callback,
                     "Writing gpt.img",

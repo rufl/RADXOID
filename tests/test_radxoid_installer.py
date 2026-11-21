@@ -3,7 +3,6 @@ import importlib.util
 import os
 import tempfile
 import unittest
-import sys
 import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -99,34 +98,48 @@ class InstallerBackendTests(unittest.TestCase):
             any(phase == "Verifying SD-card readback" for phase, _, _ in progress)
         )
 
-    def test_windows_raw_device_uses_createfile_contract(self):
+    def test_windows_raw_device_uses_win32_io_without_crt(self):
+        writes = []
+        payload = b"readback"
+
+        def write_file(_handle, raw_buffer, size, bytes_written, _overlapped):
+            writes.append(installer_module.ctypes.string_at(raw_buffer, size))
+            bytes_written._obj.value = size
+            return True
+
+        def read_file(_handle, raw_buffer, size, bytes_read, _overlapped):
+            count = min(size, len(payload))
+            installer_module.ctypes.memmove(raw_buffer, payload, count)
+            bytes_read._obj.value = count
+            return True
+
         create_file = Mock(return_value=123)
         kernel32 = SimpleNamespace(
             CreateFileW=create_file,
+            ReadFile=Mock(side_effect=read_file),
+            WriteFile=Mock(side_effect=write_file),
+            FlushFileBuffers=Mock(return_value=True),
             CloseHandle=Mock(return_value=True),
         )
-        msvcrt = SimpleNamespace(open_osfhandle=Mock(return_value=77))
-        file_object = object()
-        with (
-            patch.dict(sys.modules, {"msvcrt": msvcrt}),
-            patch.object(
-                installer_module.ctypes,
-                "WinDLL",
-                create=True,
-                return_value=kernel32,
-            ),
-            patch.object(
-                installer_module.os,
-                "fdopen",
-                return_value=file_object,
-            ) as fdopen,
+        with patch.object(
+            installer_module.ctypes,
+            "WinDLL",
+            create=True,
+            return_value=kernel32,
         ):
-            result = self.installer._open_windows_device(
+            target = self.installer._open_windows_device(
                 r"\\.\PhysicalDrive7",
                 writable=True,
             )
+            write_buffer = bytearray(b"native-write")
+            self.assertEqual(target.write(write_buffer), len(write_buffer))
+            read_buffer = bytearray(len(payload))
+            self.assertEqual(target.readinto(read_buffer), len(payload))
+            target.flush()
+            target.close()
 
-        self.assertIs(result, file_object)
+        self.assertEqual(writes, [b"native-write"])
+        self.assertEqual(read_buffer, payload)
         create_file.assert_called_once_with(
             r"\\.\PhysicalDrive7",
             0xC0000000,
@@ -136,24 +149,20 @@ class InstallerBackendTests(unittest.TestCase):
             0x80000000,
             None,
         )
-        flags = installer_module.os.O_RDWR | getattr(
-            installer_module.os,
-            "O_BINARY",
-            0,
-        )
-        msvcrt.open_osfhandle.assert_called_once_with(123, flags)
-        fdopen.assert_called_once_with(77, "r+b", buffering=0)
+        kernel32.FlushFileBuffers.assert_called_once_with(123)
+        kernel32.CloseHandle.assert_called_once_with(123)
 
     def test_windows_createfile_error_includes_device_and_system_error(self):
         kernel32 = SimpleNamespace(
-            CreateFileW=Mock(return_value=(1 << 64) - 1),
+            CreateFileW=Mock(
+                return_value=installer_module.ctypes.c_void_p(-1).value
+            ),
+            ReadFile=Mock(),
+            WriteFile=Mock(),
+            FlushFileBuffers=Mock(),
             CloseHandle=Mock(return_value=True),
         )
         with (
-            patch.dict(
-                sys.modules,
-                {"msvcrt": SimpleNamespace(open_osfhandle=Mock())},
-            ),
             patch.object(
                 installer_module.ctypes,
                 "WinDLL",
