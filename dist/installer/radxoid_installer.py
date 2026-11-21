@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.15"
+VERSION = "v1.0.16"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -169,6 +169,38 @@ class RADXOIDInstaller:
                 return candidate
         return None
 
+    @staticmethod
+    def _is_windows_sd_candidate(item):
+        """Accept SD media and card readers without admitting fixed USB disks."""
+        unsafe = any(
+            value is True or str(value).lower() == "true"
+            for value in (
+                item.get("IsBoot"),
+                item.get("IsSystem"),
+                item.get("IsReadOnly"),
+                item.get("IsOffline"),
+            )
+        )
+        if unsafe:
+            return False
+        bus_type = str(item.get("BusType", "")).upper()
+        media_type = str(item.get("MediaType", ""))
+        descriptor = " ".join(
+            str(item.get(field, ""))
+            for field in ("Model", "FriendlyName", "PNPDeviceID")
+        )
+        sd_identity = re.search(
+            r"(?i)(?:^|[^A-Z0-9])(?:SD(?:HC|XC)?|MMC)(?:[^A-Z0-9]|$)"
+            r"|CARD[\s_-]*READER|MEMORY[\s_-]*CARD",
+            descriptor,
+        )
+        return (
+            bus_type in {"SD", "MMC"}
+            or (bus_type == "USB" and "removable" in media_type.lower())
+            or sd_identity is not None
+        )
+
+
 
     def list_safe_devices(self):
         """Return removable SD-card whole disks that are writable and safe."""
@@ -177,17 +209,17 @@ class RADXOIDInstaller:
                 "$items=@(); Get-Disk | ForEach-Object { $disk=$_; "
                 "$drive=Get-CimInstance Win32_DiskDrive "
                 "-Filter ('Index=' + $disk.Number); "
-                "$removable=($disk.BusType -eq 'SD') -or "
-                "(($disk.BusType -eq 'USB') -and "
-                "($drive.MediaType -match 'Removable')); "
-                "if ($removable -and -not $disk.IsBoot -and "
-                "-not $disk.IsSystem -and -not $disk.IsReadOnly -and "
-                "-not $disk.IsOffline) { "
                 "$items += [pscustomobject]@{Number=$disk.Number; "
                 "Size=$disk.Size; Model=[string]$drive.Model; "
+                "FriendlyName=[string]$disk.FriendlyName; "
+                "MediaType=[string]$drive.MediaType; "
+                "PNPDeviceID=[string]$drive.PNPDeviceID; "
                 "BusType=[string]$disk.BusType; "
+                "IsBoot=[bool]$disk.IsBoot; IsSystem=[bool]$disk.IsSystem; "
+                "IsReadOnly=[bool]$disk.IsReadOnly; "
+                "IsOffline=[bool]$disk.IsOffline; "
                 "UniqueId=[string]$disk.UniqueId; "
-                "SerialNumber=[string]$drive.SerialNumber} } }; "
+                "SerialNumber=[string]$drive.SerialNumber} }; "
                 "$items | ConvertTo-Json -Compress"
             )
             powershell = self._powershell_executable()
@@ -223,8 +255,8 @@ class RADXOIDInstaller:
                     "path": f"\\\\.\\PhysicalDrive{item['Number']}",
                     "label": f"\\\\.\\PhysicalDrive{item['Number']} | "
                     f"{item.get('Size', 0) / 1024**3:.1f} GiB | "
-                    f"{item.get('Model', '').strip()} | "
-                    f"{item.get('BusType', 'unknown')} removable",
+                    f"{(item.get('Model') or item.get('FriendlyName') or '').strip()} | "
+                    f"{item.get('BusType', 'unknown')} SD/removable",
                     "size": int(item.get("Size", 0)),
                     "identity": (
                         f"{item.get('UniqueId', '')}|"
@@ -232,6 +264,7 @@ class RADXOIDInstaller:
                     ),
                 }
                 for item in data
+                if self._is_windows_sd_candidate(item)
             ]
 
         if not IS_LINUX:

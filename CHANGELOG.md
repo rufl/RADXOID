@@ -1,5 +1,18 @@
 # RADXOID Changelog
 
+## [v1.0.16] - Windows SDHC reader detection
+
+### Fixed
+- Detects SDHC, SDXC, MMC, and card-reader devices even when Windows reports
+  their USB reader as fixed media.
+- Collects `Get-Disk` and `Win32_DiskDrive` identity fields, then applies the
+  safety filter in Python.
+
+### Safety
+- Continues to reject boot, system, read-only, offline, and unrelated fixed
+  USB disks.
+- Added positive SDHC/card-reader and negative fixed-USB/system-disk tests.
+
 ## [v1.0.15] - Windows PowerShell discovery fix
 
 ### Fixed

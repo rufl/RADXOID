@@ -173,6 +173,33 @@ class InstallerBackendTests(unittest.TestCase):
         self.assertEqual(devices[0]["path"], r"\\.\PhysicalDrive4")
         self.assertEqual(run.call_args.args[0][0], str(powershell))
 
+    def test_windows_sdhc_reader_is_accepted_even_when_reported_fixed(self):
+        card = {
+            "BusType": "USB",
+            "MediaType": "External hard disk media",
+            "Model": "Generic SD/MMC USB Device",
+            "FriendlyName": "SDHC Card",
+            "PNPDeviceID": r"USBSTOR\DISK&VEN_GENERIC&PROD_SD/MMC",
+        }
+        self.assertTrue(self.installer._is_windows_sd_candidate(card))
+
+    def test_windows_fixed_usb_disk_and_system_disk_are_rejected(self):
+        fixed_usb = {
+            "BusType": "USB",
+            "MediaType": "External hard disk media",
+            "Model": "SanDisk External SSD USB Device",
+            "FriendlyName": "External SSD",
+            "PNPDeviceID": r"USBSTOR\DISK&VEN_SANDISK&PROD_EXTREME",
+        }
+        system_sd = {
+            "BusType": "SD",
+            "MediaType": "Removable Media",
+            "Model": "SDHC Card",
+            "IsSystem": True,
+        }
+        self.assertFalse(self.installer._is_windows_sd_candidate(fixed_usb))
+        self.assertFalse(self.installer._is_windows_sd_candidate(system_sd))
+
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "Tk requires a display")
 class InstallerGUITests(unittest.TestCase):
