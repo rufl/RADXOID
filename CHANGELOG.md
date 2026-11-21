@@ -1,5 +1,19 @@
 # RADXOID Changelog
 
+## [v1.0.17] - Broader Windows removable-media detection
+
+### Fixed
+- Accepts removable media on SCSI and other reader buses, not only USB.
+- Detects disks containing a Windows volume with `DriveType=Removable` even
+  when the device model is generic.
+
+### Diagnostics
+- Logs every enumerated physical disk with bus type, media type,
+  removable-volume status, and the final eligible/excluded decision.
+
+### Safety
+- Boot, system, read-only, offline, and unrelated fixed disks remain excluded.
+
 ## [v1.0.16] - Windows SDHC reader detection
 
 ### Fixed

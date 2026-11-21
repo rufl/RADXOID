@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.16"
+VERSION = "v1.0.17"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -194,13 +194,14 @@ class RADXOIDInstaller:
             r"|CARD[\s_-]*READER|MEMORY[\s_-]*CARD",
             descriptor,
         )
+        removable_volume = item.get("HasRemovableVolume")
         return (
             bus_type in {"SD", "MMC"}
-            or (bus_type == "USB" and "removable" in media_type.lower())
+            or "removable" in media_type.lower()
+            or removable_volume is True
+            or str(removable_volume).lower() == "true"
             or sd_identity is not None
         )
-
-
 
     def list_safe_devices(self):
         """Return removable SD-card whole disks that are writable and safe."""
@@ -209,12 +210,17 @@ class RADXOIDInstaller:
                 "$items=@(); Get-Disk | ForEach-Object { $disk=$_; "
                 "$drive=Get-CimInstance Win32_DiskDrive "
                 "-Filter ('Index=' + $disk.Number); "
+                "$hasRemovableVolume=@(Get-Partition -DiskNumber $disk.Number "
+                "-ErrorAction SilentlyContinue | Get-Volume "
+                "-ErrorAction SilentlyContinue | Where-Object "
+                "{$_.DriveType -eq 'Removable'}).Count -gt 0; "
                 "$items += [pscustomobject]@{Number=$disk.Number; "
                 "Size=$disk.Size; Model=[string]$drive.Model; "
                 "FriendlyName=[string]$disk.FriendlyName; "
                 "MediaType=[string]$drive.MediaType; "
                 "PNPDeviceID=[string]$drive.PNPDeviceID; "
                 "BusType=[string]$disk.BusType; "
+                "HasRemovableVolume=[bool]$hasRemovableVolume; "
                 "IsBoot=[bool]$disk.IsBoot; IsSystem=[bool]$disk.IsSystem; "
                 "IsReadOnly=[bool]$disk.IsReadOnly; "
                 "IsOffline=[bool]$disk.IsOffline; "
@@ -250,22 +256,36 @@ class RADXOIDInstaller:
                 return []
             if isinstance(data, dict):
                 data = [data]
-            return [
-                {
-                    "path": f"\\\\.\\PhysicalDrive{item['Number']}",
-                    "label": f"\\\\.\\PhysicalDrive{item['Number']} | "
-                    f"{item.get('Size', 0) / 1024**3:.1f} GiB | "
-                    f"{(item.get('Model') or item.get('FriendlyName') or '').strip()} | "
+            devices = []
+            for item in data:
+                number = item.get("Number")
+                size = int(item.get("Size") or 0)
+                model = str(
+                    item.get("Model") or item.get("FriendlyName") or "unknown"
+                ).strip()
+                eligible = self._is_windows_sd_candidate(item)
+                self.log(
+                    f"Windows disk scan: PhysicalDrive{number} | "
+                    f"{size / 1024**3:.1f} GiB | {model} | "
+                    f"bus={item.get('BusType', 'unknown')} | "
+                    f"media={item.get('MediaType', 'unknown')} | "
+                    f"removable-volume={item.get('HasRemovableVolume', False)} | "
+                    f"{'eligible' if eligible else 'excluded'}"
+                )
+                if not eligible:
+                    continue
+                devices.append({
+                    "path": f"\\\\.\\PhysicalDrive{number}",
+                    "label": f"\\\\.\\PhysicalDrive{number} | "
+                    f"{size / 1024**3:.1f} GiB | {model} | "
                     f"{item.get('BusType', 'unknown')} SD/removable",
-                    "size": int(item.get("Size", 0)),
+                    "size": size,
                     "identity": (
                         f"{item.get('UniqueId', '')}|"
                         f"{item.get('SerialNumber', '')}"
                     ),
-                }
-                for item in data
-                if self._is_windows_sd_candidate(item)
-            ]
+                })
+            return devices
 
         if not IS_LINUX:
             return []

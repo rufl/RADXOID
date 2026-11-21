@@ -9,7 +9,7 @@ Keep these files in one folder:
 
 - `RADXOID-Installer.exe` or `RADXOID-Installer-linux-x86_64`
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.16.txt`
+- `SHA256SUMS-v1.0.17.txt`
 
 The GPT ZIP contains one complete `gpt.img`. The installer verifies the ZIP,
 streams `gpt.img` directly to the SD card, and reads the written bytes back for
@@ -39,6 +39,8 @@ operation log. Every run also writes a durable log:
   removable USB media are listed.
 - Windows boot/system/read-only/offline disks and unrelated fixed USB disks are
   excluded.
+- The operation log records every Windows physical disk, bus/media metadata,
+  removable-volume result, and whether it was eligible or excluded.
 - Linux excludes the root disk and read-only media.
 - The target path, capacity, and available OS identity are revalidated after
   mounted partitions are removed.
@@ -103,7 +105,7 @@ established.
 
 ### Checksum failure
 
-Download the GPT ZIP and `SHA256SUMS-v1.0.16.txt` again from the same release.
+Download the GPT ZIP and `SHA256SUMS-v1.0.17.txt` again from the same release.
 Do not rename the ZIP.
 
 ### Write failure

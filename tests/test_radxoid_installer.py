@@ -172,6 +172,13 @@ class InstallerBackendTests(unittest.TestCase):
             devices = self.installer.list_safe_devices()
         self.assertEqual(devices[0]["path"], r"\\.\PhysicalDrive4")
         self.assertEqual(run.call_args.args[0][0], str(powershell))
+        log_entries = []
+        while not self.installer.log_queue.empty():
+            log_entries.append(self.installer.log_queue.get_nowait())
+        self.assertTrue(
+            any("Windows disk scan: PhysicalDrive4" in entry for entry in log_entries)
+        )
+
 
     def test_windows_sdhc_reader_is_accepted_even_when_reported_fixed(self):
         card = {
@@ -180,6 +187,23 @@ class InstallerBackendTests(unittest.TestCase):
             "Model": "Generic SD/MMC USB Device",
             "FriendlyName": "SDHC Card",
             "PNPDeviceID": r"USBSTOR\DISK&VEN_GENERIC&PROD_SD/MMC",
+        }
+        self.assertTrue(self.installer._is_windows_sd_candidate(card))
+
+    def test_windows_scsi_removable_media_is_accepted(self):
+        card = {
+            "BusType": "SCSI",
+            "MediaType": "Removable Media",
+            "Model": "Generic STORAGE DEVICE",
+        }
+        self.assertTrue(self.installer._is_windows_sd_candidate(card))
+
+    def test_windows_removable_volume_is_accepted_when_device_is_generic(self):
+        card = {
+            "BusType": "SCSI",
+            "MediaType": "External hard disk media",
+            "Model": "Generic STORAGE DEVICE",
+            "HasRemovableVolume": True,
         }
         self.assertTrue(self.installer._is_windows_sd_candidate(card))
 
