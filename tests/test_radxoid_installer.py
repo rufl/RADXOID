@@ -375,6 +375,15 @@ class InstallerBackendTests(unittest.TestCase):
             "durable-log-test",
             self.installer.log_path.read_text(encoding="utf-8"),
         )
+        self.assertIsNotNone(self.installer.latest_log_path)
+        self.assertEqual(
+            self.installer.latest_log_path.name,
+            "installer-latest.log",
+        )
+        self.assertIn(
+            "durable-log-test",
+            self.installer.latest_log_path.read_text(encoding="utf-8"),
+        )
 
     def test_windows_powershell_is_found_without_path_entry(self):
         windows_root = self.root / "Windows"

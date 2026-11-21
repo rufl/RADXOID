@@ -11,7 +11,7 @@ Keep these files in one folder:
   3.8+ installed
 - `RADXOID-Installer-linux-x86_64` on Linux
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.22.txt`
+- `SHA256SUMS-v1.0.23.txt`
 
 The GPT ZIP contains one complete `gpt.img`. The installer verifies the ZIP,
 streams `gpt.img` directly to the SD card, and reads the written bytes back for
@@ -29,11 +29,15 @@ SHA-256 verification. Other build artifacts such as `rkupdate.img`,
 6. Keep the card connected until both writing and readback verification reach
    100%.
 
-The GUI shows the active phase, bytes processed, total progress, and an
-operation log. Every run also writes a durable log:
+The GUI shows the active phase, bytes processed, total progress, persistent log
+path, and an **Open log folder** button. Every line is flushed to both a
+timestamped session log and `installer-latest.log`:
 
 - Windows: `%LOCALAPPDATA%\RADXOID\logs`
 - Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/RADXOID/logs`
+
+These files are outside the executable directory and remain available if the
+executable is quarantined or deleted.
 
 ## Safety behavior
 
@@ -115,7 +119,7 @@ established.
 
 ### Checksum failure
 
-Download the GPT ZIP and `SHA256SUMS-v1.0.22.txt` again from the same release.
+Download the GPT ZIP and `SHA256SUMS-v1.0.23.txt` again from the same release.
 Do not rename the ZIP.
 
 ### Write failure

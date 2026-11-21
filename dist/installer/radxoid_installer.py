@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.22"
+VERSION = "v1.0.23"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -146,12 +146,12 @@ class RADXOIDInstaller:
         self.checksum_skipped = False
         self.log_queue = queue.Queue()
         self.log_lock = threading.Lock()
-        self.log_path = self._create_session_log()
+        self.log_path, self.latest_log_path = self._create_log_paths()
         self.last_error = None
 
     @staticmethod
-    def _create_session_log():
-        """Create a durable per-run log outside the application directory."""
+    def _create_log_paths():
+        """Create persistent log paths outside the application directory."""
         if IS_WINDOWS:
             base = Path(
                 os.environ.get(
@@ -170,10 +170,15 @@ class RADXOIDInstaller:
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            return log_dir / f"installer-{timestamp}-{os.getpid()}.log"
+            session_path = log_dir / f"installer-{timestamp}-{os.getpid()}.log"
+            latest_path = log_dir / "installer-latest.log"
+            with open(latest_path, "w", encoding="utf-8") as latest_log:
+                latest_log.flush()
+                os.fsync(latest_log.fileno())
+            return session_path, latest_path
         except OSError as error:
-            print(f"Could not create installer log directory: {error}", file=sys.stderr)
-            return None
+            print(f"Could not create installer log files: {error}", file=sys.stderr)
+            return None, None
     
     def log(self, message, level="INFO"):
         """Record a message in the GUI queue, console, and durable log."""
@@ -181,16 +186,25 @@ class RADXOIDInstaller:
         entry = f"[{timestamp}] [{level}] {message}"
         self.log_queue.put(entry)
         print(entry, flush=True)
-        if self.log_path:
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for path in (self.log_path, self.latest_log_path)
+                if path is not None
+            )
+        )
+        for path in paths:
             try:
-                with (
-                    self.log_lock,
-                    open(self.log_path, "a", encoding="utf-8") as log_file,
-                ):
+                with self.log_lock, open(path, "a", encoding="utf-8") as log_file:
                     log_file.write(entry + "\n")
+                    log_file.flush()
+                    os.fsync(log_file.fileno())
             except OSError as error:
-                print(f"Could not write installer log: {error}", file=sys.stderr)
-                self.log_path = None
+                print(f"Could not write installer log {path}: {error}", file=sys.stderr)
+                if path == self.log_path:
+                    self.log_path = None
+                if path == self.latest_log_path:
+                    self.latest_log_path = None
     
     def select_volumes_dir(self):
         """Select the directory containing the release assets."""
@@ -1309,6 +1323,10 @@ class RADXOIDGUI:
         self.installer.log(f"Platform: {PLATFORM}")
         if self.installer.log_path:
             self.installer.log(f"Session log: {self.installer.log_path}")
+        if self.installer.latest_log_path:
+            self.installer.log(
+                f"Persistent latest log: {self.installer.latest_log_path}"
+            )
         self.root.after(100, self.process_queues)
 
     def create_ui(self):
@@ -1347,6 +1365,21 @@ class RADXOIDGUI:
 
         self.log_frame = ttk.LabelFrame(main_frame, text="Operation log")
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        log_header = ttk.Frame(self.log_frame)
+        log_header.pack(fill=tk.X, padx=4, pady=(2, 4))
+        visible_log_path = (
+            self.installer.latest_log_path or self.installer.log_path or "unavailable"
+        )
+        ttk.Label(
+            log_header,
+            text=f"Persistent file: {visible_log_path}",
+            anchor=tk.W,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            log_header,
+            text="Open log folder",
+            command=self.open_log_folder,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
         self.log_text = scrolledtext.ScrolledText(
             self.log_frame,
             wrap=tk.WORD,
@@ -1852,6 +1885,24 @@ class RADXOIDGUI:
         self.current_step -= 1
         self.update_step_indicator()
         self.update_content_frame()
+
+    def open_log_folder(self):
+        path = self.installer.latest_log_path or self.installer.log_path
+        if path is None:
+            messagebox.showerror("Log unavailable", "No persistent log file is available.")
+            return
+        try:
+            if IS_WINDOWS:
+                os.startfile(path.parent)
+            elif IS_LINUX:
+                subprocess.Popen(["xdg-open", str(path.parent)])
+            else:
+                raise OSError(f"Cannot open folders on {PLATFORM}")
+        except OSError as error:
+            messagebox.showerror(
+                "Could not open log folder",
+                f"{path.parent}\n\n{error}",
+            )
 
     def close_app(self):
         if self.flash_busy():

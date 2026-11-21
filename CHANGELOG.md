@@ -1,5 +1,20 @@
 # RADXOID Changelog
 
+## [v1.0.23] - Persistent crash-safe log
+
+### Added
+- Writes every entry to both a timestamped session log and the stable
+  `installer-latest.log` outside the executable directory.
+- Flushes and calls `fsync` after every line so Defender termination or process
+  failure does not leave important progress only in memory.
+- Shows the persistent file path above the GUI log and adds an
+  **Open log folder** button.
+
+### Location
+- Windows: `%LOCALAPPDATA%\\RADXOID\\logs\\installer-latest.log`
+- Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/RADXOID/logs/installer-latest.log`
+
+
 ## [v1.0.22] - Defender-safe source launcher
 
 ### Added
