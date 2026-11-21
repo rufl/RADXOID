@@ -21,12 +21,38 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.21"
+VERSION = "v1.0.22"
 
 # Platform detection
 PLATFORM = sys.platform
 IS_WINDOWS = PLATFORM.startswith('win')
 IS_LINUX = PLATFORM.startswith('linux')
+
+def _ensure_windows_elevation():
+    """Request UAC elevation for the source .pyw fallback."""
+    if not IS_WINDOWS:
+        return True
+    try:
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return True
+        arguments = list(sys.argv[1:])
+        if not getattr(sys, "frozen", False):
+            arguments.insert(0, str(Path(__file__).resolve()))
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            sys.executable,
+            subprocess.list2cmdline(arguments),
+            None,
+            1,
+        )
+    except (AttributeError, OSError) as error:
+        raise OSError(f"Could not request Administrator privileges: {error}") from error
+    if result <= 32:
+        raise OSError(
+            f"Windows refused the Administrator elevation request (code {result})"
+        )
+    return False
 
 class _WindowsRawDevice:
     """Minimal unbuffered file object backed only by Win32 device APIs."""
@@ -1843,6 +1869,27 @@ class RADXOIDGUI:
 
 
 def main():
+    if IS_WINDOWS:
+        try:
+            if not _ensure_windows_elevation():
+                return
+        except OSError as error:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                str(error),
+                f"RADXOID Installer {VERSION}",
+                0x10,
+            )
+            return
+        if not GUI_AVAILABLE:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Tkinter is unavailable. Install Python from python.org with "
+                "the Tcl/Tk option enabled.",
+                f"RADXOID Installer {VERSION}",
+                0x10,
+            )
+            return
     if GUI_AVAILABLE:
         root = tk.Tk()
         RADXOIDGUI(root).run_app()

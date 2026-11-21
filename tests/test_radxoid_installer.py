@@ -39,6 +39,43 @@ class InstallerBackendTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_source_launcher_requests_uac_elevation(self):
+        shell32 = SimpleNamespace(
+            IsUserAnAdmin=Mock(return_value=False),
+            ShellExecuteW=Mock(return_value=42),
+        )
+        with (
+            patch.object(installer_module, "IS_WINDOWS", True),
+            patch.object(
+                installer_module.ctypes,
+                "windll",
+                create=True,
+                new=SimpleNamespace(shell32=shell32),
+            ),
+            patch.object(
+                installer_module.sys,
+                "executable",
+                r"C:\Python\pythonw.exe",
+            ),
+            patch.object(
+                installer_module.sys,
+                "argv",
+                [r"C:\Downloads\RADXOID-Installer.pyw"],
+            ),
+            patch.object(
+                installer_module.sys,
+                "frozen",
+                False,
+                create=True,
+            ),
+        ):
+            self.assertFalse(installer_module._ensure_windows_elevation())
+
+        launch = shell32.ShellExecuteW.call_args.args
+        self.assertEqual(launch[1], "runas")
+        self.assertEqual(launch[2], r"C:\Python\pythonw.exe")
+        self.assertIn("radxoid_installer.py", launch[3])
+
     def test_manifest_verification_and_image_inspection(self):
         progress = []
         self.assertTrue(self.installer.verify_checksums(progress.append))

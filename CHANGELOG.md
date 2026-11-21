@@ -1,5 +1,23 @@
 # RADXOID Changelog
 
+## [v1.0.22] - Defender-safe source launcher
+
+### Added
+- Publishes `RADXOID-Installer.pyw`, a plain-source fallback that avoids the
+  PyInstaller one-file self-extraction pattern associated with Defender false
+  positives.
+- The source launcher requests UAC elevation itself and shows a Windows dialog
+  when Python lacks Tcl/Tk.
+- Publishes `SHA256SUMS-installers.txt` for the executable, source launcher, and
+  Linux binary.
+
+### Recovery
+- An interrupted card is explicitly treated as incomplete unless the durable
+  log contains both the final verified SHA-256 and the success message.
+- Restarting safely rewrites the complete image from byte zero; there is no
+  unsafe resume mode.
+
+
 ## [v1.0.21] - Lock volumes without dismounting the reader
 
 ### Fixed

@@ -7,9 +7,11 @@ It does not join files or create an intermediate image.
 
 Keep these files in one folder:
 
-- `RADXOID-Installer.exe` or `RADXOID-Installer-linux-x86_64`
+- `RADXOID-Installer.exe`, or `RADXOID-Installer.pyw` with official Python
+  3.8+ installed
+- `RADXOID-Installer-linux-x86_64` on Linux
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.21.txt`
+- `SHA256SUMS-v1.0.22.txt`
 
 The GPT ZIP contains one complete `gpt.img`. The installer verifies the ZIP,
 streams `gpt.img` directly to the SD card, and reads the written bytes back for
@@ -58,13 +60,17 @@ operation log. Every run also writes a durable log:
 ### Windows
 
 - Windows 10 or newer.
-- Run the packaged executable. Its manifest requests Administrator privileges.
+- The executable manifest and source `.pyw` launcher both request Administrator
+  privileges.
 - The installer locates Windows PowerShell by its system path even when the
   packaged GUI has a minimal `PATH`.
 - Raw physical-disk handles remain entirely in Win32: `CreateFileW`,
   `WriteFile`, `ReadFile`, `FlushFileBuffers`, and `CloseHandle`.
 - Mount points are removed without taking removable media offline. Filesystem
   volumes remain exclusively locked until write and readback complete.
+- If Defender removes the unsigned PyInstaller executable, do not disable
+  Defender. Install Python from python.org with Tcl/Tk, verify
+  `SHA256SUMS-installers.txt`, and run `RADXOID-Installer.pyw`.
 
 ### Linux
 
@@ -109,7 +115,7 @@ established.
 
 ### Checksum failure
 
-Download the GPT ZIP and `SHA256SUMS-v1.0.21.txt` again from the same release.
+Download the GPT ZIP and `SHA256SUMS-v1.0.22.txt` again from the same release.
 Do not rename the ZIP.
 
 ### Write failure
@@ -117,5 +123,13 @@ Do not rename the ZIP.
 Leave the card inserted, copy the visible operation log or durable session log,
 and report the complete error. A failed write must be restarted from the
 beginning; the partial card is not bootable.
+
+### Interrupted write
+
+Treat the card as incomplete unless the durable log contains both
+`Verified SHA-256:` and
+`SD-card write and readback verification completed successfully!`. Reconnect
+the card and restart the complete write from the beginning. Do not boot or use
+a card whose final readback verification did not finish.
 
 Flashing erases the entire selected SD card. Back it up first.
