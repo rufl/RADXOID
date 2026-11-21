@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.20"
+VERSION = "v1.0.21"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -792,7 +792,7 @@ class RADXOIDInstaller:
             kernel32.CloseHandle(handle)
 
     def _lock_windows_volumes(self, device):
-        """Remove mount points, lock each volume, and keep it dismounted."""
+        """Remove mount points and hold exclusive volume locks."""
         number = self._windows_disk_number(device)
         if number is None:
             self.log("Error: Invalid Windows physical-disk path", "ERROR")
@@ -852,7 +852,6 @@ class RADXOIDInstaller:
         file_share_write = 0x00000002
         open_existing = 3
         fsctl_lock_volume = 0x00090018
-        fsctl_dismount_volume = 0x00090020
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateFileW.argtypes = [
             wintypes.LPCWSTR,
@@ -901,32 +900,28 @@ class RADXOIDInstaller:
                 return None
             locks.append((kernel32, handle, volume_path))
             returned = wintypes.DWORD()
-            for operation, control_code in (
-                ("FSCTL_LOCK_VOLUME", fsctl_lock_volume),
-                ("FSCTL_DISMOUNT_VOLUME", fsctl_dismount_volume),
+            if not kernel32.DeviceIoControl(
+                handle,
+                fsctl_lock_volume,
+                None,
+                0,
+                None,
+                0,
+                ctypes.byref(returned),
+                None,
             ):
-                if not kernel32.DeviceIoControl(
-                    handle,
-                    control_code,
-                    None,
-                    0,
-                    None,
-                    0,
-                    ctypes.byref(returned),
-                    None,
-                ):
-                    error_code = ctypes.get_last_error()
-                    detail = ctypes.FormatError(error_code).strip()
-                    self._release_windows_volume_locks(locks)
-                    self.log(
-                        f"Error: {operation} failed for {volume_path} "
-                        f"(Windows error {error_code}): {detail}. "
-                        "Close Explorer and any program using the SD card.",
-                        "ERROR",
-                    )
-                    return None
+                error_code = ctypes.get_last_error()
+                detail = ctypes.FormatError(error_code).strip()
+                self._release_windows_volume_locks(locks)
+                self.log(
+                    f"Error: FSCTL_LOCK_VOLUME failed for {volume_path} "
+                    f"(Windows error {error_code}): {detail}. "
+                    "Close Explorer and any program using the SD card.",
+                    "ERROR",
+                )
+                return None
         self.log(
-            f"Locked and dismounted {len(locks)} volume(s) on PhysicalDrive{number}"
+            f"Locked {len(locks)} volume(s) on PhysicalDrive{number}"
         )
         return locks
 

@@ -240,7 +240,7 @@ class InstallerBackendTests(unittest.TestCase):
         controls = [
             call.args[1] for call in kernel32.DeviceIoControl.call_args_list
         ]
-        self.assertEqual(controls, [0x00090018, 0x00090020])
+        self.assertEqual(controls, [0x00090018])
         self.installer._release_windows_volume_locks(locks)
         kernel32.CloseHandle.assert_called_once_with(456)
 

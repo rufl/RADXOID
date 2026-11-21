@@ -1,5 +1,23 @@
 # RADXOID Changelog
 
+## [v1.0.21] - Lock volumes without dismounting the reader
+
+### Fixed
+- Removes `FSCTL_DISMOUNT_VOLUME` from the Windows SD preparation sequence.
+  This SDXC reader returned error 21 after both `mountvol /p` and explicit
+  dismounting.
+- Retains `FSCTL_LOCK_VOLUME`, which Microsoft documents as sufficient for
+  exclusive raw writes to sectors inside mounted volume extents.
+
+### Safety
+- Volume locks flush cached data, prove that no files remain open, block other
+  filesystem access, and stay held until write plus SHA-256 readback complete.
+
+### Verification
+- Regression coverage now requires exactly one control operation per volume:
+  `FSCTL_LOCK_VOLUME`.
+
+
 ## [v1.0.20] - Keep Windows removable media online
 
 ### Fixed
