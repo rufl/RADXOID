@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.11"
+VERSION = "v1.0.12"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -210,56 +210,8 @@ class RADXOIDInstaller:
             self.log("Invalid target selection", "ERROR")
             return None
     
-    def list_volumes(self):
-        """List split volume files with numeric suffixes."""
-        if not self.volumes_dir:
-            return []
-        
-        return sorted(
-            volume
-            for volume in self.volumes_dir.iterdir()
-            if volume.is_file()
-            and not volume.is_symlink()
-            and volume.name.rsplit(".", 1)[-1].isdigit()
-        )
-    
-    def group_volumes_by_base(self, volumes):
-        """Group volumes by base filename"""
-        groups = {}
-        for vol in volumes:
-            # Extract base name (remove .001, .002, etc.)
-            base = vol.name.rsplit('.', 1)[0]
-            if base not in groups:
-                groups[base] = []
-            groups[base].append(vol)
-        return groups
-    
-    def join_volumes(self, volumes, output_path, progress_callback=None):
-        """Join split volumes into a temporary file, then atomically replace output."""
-        if output_path.exists() and output_path.is_symlink():
-            raise ValueError(f"Refusing symlink output: {output_path}")
-        temporary = output_path.with_name(f".{output_path.name}.partial")
-        self.log(f"Joining {len(volumes)} volumes into {output_path.name}")
-        try:
-            with open(temporary, "wb") as out_file:
-                for vol in sorted(volumes):
-                    if vol.is_symlink() or not vol.is_file():
-                        raise ValueError(f"Refusing unsafe volume: {vol}")
-                    self.log(f"  Reading: {vol.name}")
-                    with open(vol, "rb") as vf:
-                        while chunk := vf.read(4 * 1024 * 1024):
-                            out_file.write(chunk)
-                            if progress_callback:
-                                progress_callback(len(chunk))
-            os.replace(temporary, output_path)
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
-        self.log(f"Created: {output_path.name} ({output_path.stat().st_size/1024/1024:.1f}MB)")
-        return True
-    
-    def join_all_volumes(self, progress_callback=None):
-        """Join split volumes and copy complete files safely."""
+    def prepare_output(self, progress_callback=None):
+        """Copy complete release assets; do not concatenate volumes."""
         if not self.volumes_dir or not self.output_dir:
             self.log("Error: Volumes or output directory not set", "ERROR")
             return False
@@ -268,25 +220,35 @@ class RADXOIDInstaller:
         if output_root == volumes_root or volumes_root in output_root.parents:
             self.log("Error: Output directory cannot be inside volumes directory", "ERROR")
             return False
-        
-        volumes = self.list_volumes()
-        groups = self.group_volumes_by_base(volumes)
+
+        split_files = [
+            item for item in self.volumes_dir.iterdir()
+            if item.is_file()
+            and not item.is_symlink()
+            and item.name.rsplit(".", 1)[-1].isdigit()
+        ]
+        if split_files:
+            self.log(
+                "Error: split volume files are unsupported; use complete release assets",
+                "ERROR",
+            )
+            return False
+
         complete_files = [
             item for item in self.volumes_dir.iterdir()
             if item.is_file()
             and not item.is_symlink()
             and not item.name.startswith("SHA256SUMS")
-            and not item.name.rsplit(".", 1)[-1].isdigit()
         ]
-        if not groups and not complete_files:
-            self.log("Error: No distribution files found", "ERROR")
+        if not complete_files:
+            self.log("Error: No complete distribution files found", "ERROR")
             return False
-        
-        total_bytes = sum(volume.stat().st_size for volume in volumes)
-        total_bytes += sum(item.stat().st_size for item in complete_files)
+
+        total_bytes = sum(item.stat().st_size for item in complete_files)
         processed_bytes = 0
         if progress_callback:
             progress_callback(0.0)
+        self.log("Preparing complete release assets; no concatenation required")
 
         def advance(count):
             nonlocal processed_bytes
@@ -297,13 +259,6 @@ class RADXOIDInstaller:
                     if total_bytes else 100.0
                 )
 
-        if groups:
-            self.log(f"Joining {len(groups)} split file(s)")
-        else:
-            self.log("No split volumes found; copying complete release assets")
-        for base, vols in groups.items():
-            self.join_volumes(vols, self.output_dir / base, advance)
-        
         for complete_file in complete_files:
             destination_name = (
                 "update.img"
@@ -322,17 +277,15 @@ class RADXOIDInstaller:
                         advance(len(chunk))
                 os.replace(temporary, destination)
                 if destination.stat().st_size != complete_file.stat().st_size:
-                    raise IOError(
-                        f"Output size mismatch for {destination.name}"
-                    )
+                    raise IOError(f"Output size mismatch for {destination.name}")
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
             self.log(f"Copied: {complete_file.name} -> {destination.name}")
-        
+
         if progress_callback:
             progress_callback(100.0)
-        self.log(f"Assets ready in output directory: {self.output_dir}")
+        self.log(f"Output ready in directory: {self.output_dir}")
         return True
     
     def verify_checksums(self, progress_callback=None, cancel_event=None):
@@ -501,18 +454,18 @@ class RADXOIDInstaller:
         return digest.hexdigest()
 
     def flash_to_sd_card(self, device):
-        """Flash joined image to a freshly revalidated Linux SD-card target."""
+        """Flash the prepared update image to a freshly revalidated SD card."""
         if not device:
             self.log("Error: No SD card device selected", "ERROR")
             return False
         image_file = self.output_dir / "update.img"
         if not image_file.is_file() or image_file.is_symlink():
-            self.log("Error: Joined update.img not found or unsafe", "ERROR")
+            self.log("Error: Prepared update.img not found or unsafe", "ERROR")
             return False
         if not IS_LINUX:
             self.log(
                 "Raw flashing is disabled on this platform. "
-                "Use Etcher or Rufus with the joined update.img.",
+                "Use Etcher or Rufus with update.img.",
                 "ERROR",
             )
             return False
@@ -579,11 +532,11 @@ class RADXOIDInstaller:
         if not self.select_output_dir():
             return False
         
-        # Step 4: Join volumes
-        if not self.join_all_volumes():
+        # Step 4: Prepare complete output assets
+        if not self.prepare_output():
             return False
-        
-        self.log("\n✅ All volumes joined successfully!")
+
+        self.log("\n✅ Output assets prepared successfully!")
         self.log(f"Files are in: {self.output_dir}")
         
         return True
@@ -609,7 +562,7 @@ class RADXOIDGUI:
         self.operation_percent = 0.0
         self.progress_queue = queue.Queue()
         self.checksum_started = False
-        self.join_started = False
+        self.prepare_started = False
         # Create UI
         self.create_ui()
         
@@ -647,10 +600,10 @@ class RADXOIDGUI:
         
         # Step indicators
         self.steps = [
-            "Select Volumes",
+            "Select Assets",
             "Verify Checksums",
             "Select Output",
-            "Join Volumes",
+            "Prepare Output",
             "Flash to SD Card"
         ]
         self.current_step = 0
@@ -801,7 +754,7 @@ class RADXOIDGUI:
         elif self.current_step == 2:
             ttk.Label(
                 self.content_frame,
-                text="Select the directory to save joined files",
+                text="Select the output directory for prepared release assets",
                 padding=5
             ).pack(pady=5)
             
@@ -818,18 +771,18 @@ class RADXOIDGUI:
                     foreground='green'
                 ).pack(pady=5)
         
-        # Step 3: Join Volumes
+        # Step 3: Prepare complete output assets
         elif self.current_step == 3:
-            join_result = getattr(self, "join_result", None)
+            prepare_result = getattr(self, "prepare_result", None)
             percent = int(self.operation_percent)
-            if join_result is None:
-                text = f"Joining release assets: {percent}% complete."
+            if prepare_result is None:
+                text = f"Preparing complete assets: {percent}% complete."
                 color = "blue"
-            elif join_result:
-                text = "Assets joined successfully. Click Next."
+            elif prepare_result:
+                text = "Output assets prepared successfully. Click Next."
                 color = "green"
             else:
-                text = f"Volume joining failed: {self.join_error}"
+                text = f"Output preparation failed: {self.prepare_error}"
                 color = "red"
             ttk.Label(
                 self.content_frame,
@@ -838,23 +791,22 @@ class RADXOIDGUI:
                 padding=5,
                 wraplength=650,
             ).pack(pady=5)
-            
-            if not self.join_started:
-                self.join_result = None
-                self.join_started = True
-                threading.Thread(target=self.run_join, daemon=True).start()
-            elif self.join_result and self.installer.output_dir:
+
+            if not self.prepare_started:
+                self.prepare_result = None
+                self.prepare_started = True
+                threading.Thread(target=self.run_prepare, daemon=True).start()
+            elif self.prepare_result and self.installer.output_dir:
                 ttk.Button(
                     self.content_frame,
                     text="Open output folder",
                     command=self.open_output,
                 ).pack(pady=10)
-        
         # Step 4: Flash to SD Card
         elif self.current_step == 4:
             ttk.Label(
                 self.content_frame,
-                text="Flash the joined image to SD card",
+                text="Flash update.img to the SD card",
                 padding=5,
             ).pack(pady=5)
             ttk.Button(
@@ -867,7 +819,7 @@ class RADXOIDGUI:
                 ttk.Label(
                     self.content_frame,
                     text="Windows does not raw-flash disks. Use Rufus or Etcher "
-                    "with the joined update.img.",
+                    "with update.img.",
                     foreground="blue",
                     padding=5,
                     wraplength=650,
@@ -928,11 +880,11 @@ class RADXOIDGUI:
                 ).pack(pady=5)
         busy = (
             (self.current_step == 1 and getattr(self, "checksum_result", None) is None)
-            or (self.current_step == 3 and getattr(self, "join_result", None) is None)
+            or (self.current_step == 3 and getattr(self, "prepare_result", None) is None)
         )
         blocked = (
             (self.current_step == 1 and getattr(self, "checksum_result", None) is not True)
-            or (self.current_step == 3 and getattr(self, "join_result", None) is not True)
+            or (self.current_step == 3 and getattr(self, "prepare_result", None) is not True)
         )
         self.progress_bar.stop()
         self.progress_bar.config(mode="determinate")
@@ -999,7 +951,7 @@ class RADXOIDGUI:
         if self.installer.select_output_dir():
             self.update_content_frame()
     def open_output(self):
-        """Open the joined-file directory in the platform file manager."""
+        """Open the prepared-output directory in the platform file manager."""
         output_dir = self.installer.output_dir
         if not output_dir:
             return
@@ -1049,18 +1001,18 @@ class RADXOIDGUI:
         self.installer.log("Checksum verification completed")
         self.root.after(0, self.update_content_frame)
     
-    def run_join(self):
-        """Run volume joining."""
-        self.installer.log("Starting volume joining...")
+    def run_prepare(self):
+        """Prepare complete release assets in the selected output directory."""
+        self.installer.log("Starting output preparation...")
         try:
-            self.join_result = self.installer.join_all_volumes(
-                progress_callback=lambda value: self._report_progress("Join", value),
+            self.prepare_result = self.installer.prepare_output(
+                progress_callback=lambda value: self._report_progress("Prepare", value),
             )
         except Exception as error:
-            self.join_error = str(error)
-            self.join_result = False
-            self.installer.log(f"Volume joining failed: {error}", "ERROR")
-        self.installer.log("Volume joining completed")
+            self.prepare_error = str(error)
+            self.prepare_result = False
+            self.installer.log(f"Output preparation failed: {error}", "ERROR")
+        self.installer.log("Output preparation completed")
         self.root.after(0, self.update_content_frame)
     
     def select_gui_device(self):
@@ -1113,13 +1065,13 @@ class RADXOIDGUI:
             return
         
         if self.current_step == 3:
-            if not hasattr(self, 'join_result') or self.join_result is None:
-                messagebox.showerror("Error", "Volume joining in progress...")
+            if not hasattr(self, 'prepare_result') or self.prepare_result is None:
+                messagebox.showerror("Error", "Output preparation in progress...")
                 return
-            if not self.join_result:
+            if not self.prepare_result:
                 messagebox.showerror(
-                    "Volume joining failed",
-                    self.join_error or "Choose an output folder outside the volumes folder.",
+                    "Output preparation failed",
+                    self.prepare_error or "Choose an output folder outside the source folder.",
                 )
                 return
         
@@ -1132,9 +1084,9 @@ class RADXOIDGUI:
             self.operation_percent = 0.0
             self._last_progress = -1
         elif self.current_step == 2:
-            self.join_result = None
-            self.join_error = None
-            self.join_started = False
+            self.prepare_result = None
+            self.prepare_error = None
+            self.prepare_started = False
             self.operation_percent = 0.0
             self._last_progress = -1
         # Move to next step
@@ -1183,13 +1135,14 @@ def main():
         if installer.select_volumes_dir():
             if installer.verify_checksums():
                 if installer.select_output_dir():
-                    if installer.join_all_volumes():
-                        print("\n✅ All done!")
+                    if installer.prepare_output():
+                        print("\n✅ Output assets prepared!")
                         print(f"Files are in: {installer.output_dir}")
                         
                         # Ask if user wants to flash
                         if IS_WINDOWS:
-                            print("\nNote: Windows joins only. Flash update.img with Rufus or Etcher.")
+                            print("\nNote: Windows raw flashing is disabled. "
+                                  "Flash update.img with Rufus or Etcher.")
                         else:
                             device = installer.select_sd_card()
                             if device:
