@@ -38,7 +38,7 @@ Safety model:
 ### Windows
 1. Download `RADXOID-Installer.exe` from the release.
 2. Download the complete `rkupdate.img`, its `.zip` companion, and
-  `SHA256SUMS-v1.0.12.txt` into one directory.
+  `SHA256SUMS-v1.0.13.txt` into one directory.
 3. Run the installer, choose the directory, then choose an output directory.
    The `.img` is already complete; the `.zip` is not a second image part.
 4. The installer verifies both assets and writes the complete image as
@@ -80,7 +80,7 @@ RADXOID-v1.0.2/
 
 ### Verify and prepare
 - Select the directory containing the release assets and either
-  `SHA256SUMS.txt` or the versioned `SHA256SUMS-v1.0.12.txt` manifest.
+  `SHA256SUMS.txt` or the versioned `SHA256SUMS-v1.0.13.txt` manifest.
 - Verification fails closed if the manifest is missing, malformed, incomplete,
   contains a path, or references a missing/symlink file.
 - Complete `rkupdate.img` assets are normalized to `update.img`; `.zip`
@@ -92,13 +92,16 @@ RADXOID-v1.0.2/
   confirmation; skipping removes integrity protection and is not recommended.
 
 ### Flashing
-- Windows: preparation only; flash `update.img` with
-  [Rufus](https://rufus.ie/) or [balenaEtcher](https://etcher.balena.io/).
-- Linux: only whole, writable SD disks are offered. Root disks, mounted disks,
-  partitions, USB disks, and unknown media are not offered.
-- The selected disk is revalidated immediately before writing. Its partitions
-  are unmounted, capacity is checked, and the image-sized region is read back
-  and hashed after `dd`.
+- The GUI writes `update.img` directly to the selected physical SD disk.
+- Windows requires Administrator elevation; removable SD/USB candidates are
+  listed, mounted SD-card partitions are dismounted, and the raw disk is
+  revalidated.
+- Linux uses root privileges or a graphical `pkexec` authorization prompt.
+- The GUI reports validation, dismount, write bytes, buffer flush, source hash,
+  readback hash, and final verification in the status bar and operation log.
+- The selected disk capacity is checked, and the image-sized region is read
+  back and hashed after writing.
+- A final exact confirmation (`ERASE <device>`) is required.
 - Flashing destroys all data on the selected SD card. Back up first.
 
 ---
@@ -141,7 +144,7 @@ adb devices
 
 ### No assets found or checksum failure
 Keep the complete `.img`, optional `.zip` companion, and
-`SHA256SUMS-v1.0.12.txt` in the same directory. The `.img` and `.zip` are
+`SHA256SUMS-v1.0.13.txt` in the same directory. The `.img` and `.zip` are
 different representations of the same release asset, not two parts to
 concatenate. Redownload the manifest and assets together if a checksum fails.
 
