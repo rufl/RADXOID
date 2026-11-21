@@ -1,6 +1,6 @@
 #!/bin/bash
 # RADXOID Installer - Build for Linux
-# This script creates a standalone AppImage for Linux
+# This script creates a standalone Linux executable
 
 set -e
 
@@ -54,11 +54,4 @@ cp ../README.md build/linux/
 cp ../LICENSE build/linux/
 
 echo ""
-echo "To create the distribution package:"
-echo "1. Run: python3 split_volumes.py /path/to/artifacts dist/volumes"
-echo "2. Copy all files to: build/linux/volumes/"
-echo "3. Create AppImage (optional):"
-echo "   linuxdeploy-x86_64.AppImage build/linux/RADXOID-Installer -o build/linux/"
-echo ""
-echo "Or create a tar.gz:"
-echo "   tar -czvf RADXOID-v1.0.0-linux.tar.gz -C build/linux ."
+echo "Place the executable, GPT ZIP, and versioned SHA-256 manifest in the release."

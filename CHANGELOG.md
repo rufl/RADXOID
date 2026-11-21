@@ -1,5 +1,23 @@
 # RADXOID Changelog
 
+## [v1.0.14] - Verified SD-card writer
+
+### Fixed
+- Removed the invalid join/output stages; release artifacts are complete files.
+- Writes `gpt.img` from the verified GPT ZIP instead of raw-writing the
+  Rockchip USB-loader `update.img` package.
+- Restored GUI log delivery and added durable per-run log files.
+- Moved all Tk updates and dialogs to the main thread.
+- Blocks Back and window close while a destructive write is active.
+- Revalidates target path, size, and available device identity after unmount.
+- Verifies ZIP CRC during streaming and SHA-256 through full device readback.
+
+### Added
+- Three-step GUI: select assets, verify checksums, write SD card.
+- Byte and percentage progress for writing and readback verification.
+- Windows removable-disk handling with Administrator manifest elevation.
+- Linux `pkexec`/root raw-write path with explicit whole-disk confirmation.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to a loose semantic versioning.

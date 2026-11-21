@@ -45,7 +45,7 @@ jobs:
         run: python -m pip install pyinstaller
       - name: Build Windows executable
         run: |
-          pyinstaller --onefile --windowed --name RADXOID-Installer `
+          pyinstaller --onefile --windowed --uac-admin --name RADXOID-Installer `
             --distpath dist/out --workpath dist/work dist/installer/radxoid_installer.py
           Get-Item dist/out/RADXOID-Installer.exe
       - uses: actions/upload-artifact@v4

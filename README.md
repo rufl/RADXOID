@@ -105,6 +105,23 @@ Use the helper:
 ./scripts/flash-rock3a.sh [adb-serial]
 ```
 
+### GUI SD-card installer
+
+The release GUI writes the complete raw `gpt.img` contained in
+`rk356x_rock_3a_r_20261120.1320_gpt.zip`. It does not join release assets and
+does not write the Rockchip USB-loader `update.img` package as a raw SD image.
+
+Required files:
+
+- `RADXOID-Installer.exe` or `RADXOID-Installer-linux-x86_64`
+- `rk356x_rock_3a_r_20261120.1320_gpt.zip`
+- `SHA256SUMS-v1.0.14.txt`
+
+The GUI verifies the ZIP, streams `gpt.img` to a removable whole-disk target,
+then reads the written image back and compares SHA-256. Progress and every
+operation are shown in the GUI and saved to a per-run log. See
+[`dist/installer/README.md`](dist/installer/README.md).
+
 ## Verification
 
 After flashing, verify Mali-G52 GPU on the device:

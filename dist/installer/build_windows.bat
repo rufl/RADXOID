@@ -29,6 +29,7 @@ echo Building RADXOID Installer for Windows...
 python -m PyInstaller ^
     --onefile ^
     --windowed ^
+    --uac-admin ^
     --name RADXOID-Installer ^
     --icon=radxoid.ico ^
     --add-data "../README.md;." ^

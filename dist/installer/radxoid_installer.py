@@ -5,42 +5,32 @@ Cross-platform installer for RADXOID distribution
 Supports Windows and Linux
 """
 
-import os
-import sys
-import subprocess
+import ctypes
 import hashlib
 import json
-import re
-import threading
+import os
 import queue
-import select
-from pathlib import Path
+import re
 import shutil
+import subprocess
+import sys
+import threading
+import zipfile
 from datetime import datetime
-
-# Check if we're running as a PyInstaller bundle
-if getattr(sys, 'frozen', False):
-    # Running as bundle
-    APP_DIR = Path(sys.executable).parent
-else:
-    # Running as script
-    APP_DIR = Path(__file__).parent
+from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.13"
-REPO_URL = "https://github.com/rufl/RADXOID"
-RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
+VERSION = "v1.0.14"
 
 # Platform detection
 PLATFORM = sys.platform
 IS_WINDOWS = PLATFORM.startswith('win')
 IS_LINUX = PLATFORM.startswith('linux')
-IS_MAC = PLATFORM.startswith('darwin')
 
 # GUI imports
 try:
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+    from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
     GUI_AVAILABLE = True
 except ImportError:
     GUI_AVAILABLE = False
@@ -51,77 +41,106 @@ class RADXOIDInstaller:
     
     def __init__(self):
         self.volumes_dir = None
-        self.output_dir = None
-        self.temp_dir = APP_DIR / "temp"
+        self.verified_files = set()
+        self.checksum_skipped = False
         self.log_queue = queue.Queue()
-        self.running = False
-        
-        # Create temp directory
-        self.temp_dir.mkdir(exist_ok=True)
+        self.log_lock = threading.Lock()
+        self.log_path = self._create_session_log()
+
+    @staticmethod
+    def _create_session_log():
+        """Create a durable per-run log outside the application directory."""
+        if IS_WINDOWS:
+            base = Path(
+                os.environ.get(
+                    "LOCALAPPDATA",
+                    Path.home() / "AppData" / "Local",
+                )
+            )
+        else:
+            base = Path(
+                os.environ.get(
+                    "XDG_STATE_HOME",
+                    Path.home() / ".local" / "state",
+                )
+            )
+        log_dir = base / "RADXOID" / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            return log_dir / f"installer-{timestamp}-{os.getpid()}.log"
+        except OSError as error:
+            print(f"Could not create installer log directory: {error}", file=sys.stderr)
+            return None
     
     def log(self, message, level="INFO"):
-        """Log a message"""
+        """Record a message in the GUI queue, console, and durable log."""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_queue.put(f"[{timestamp}] [{level}] {message}")
-        print(f"[{timestamp}] [{level}] {message}")
-    
-    def process_log_queue(self, text_widget=None):
-        """Process log queue"""
-        while not self.log_queue.empty():
-            message = self.log_queue.get()
-            if text_widget:
-                text_widget.insert(tk.END, message + "\n")
-                text_widget.see(tk.END)
-            print(message)
+        entry = f"[{timestamp}] [{level}] {message}"
+        self.log_queue.put(entry)
+        print(entry, flush=True)
+        if self.log_path:
+            try:
+                with (
+                    self.log_lock,
+                    open(self.log_path, "a", encoding="utf-8") as log_file,
+                ):
+                    log_file.write(entry + "\n")
+            except OSError as error:
+                print(f"Could not write installer log: {error}", file=sys.stderr)
+                self.log_path = None
     
     def select_volumes_dir(self):
-        """Select volumes directory"""
+        """Select the directory containing the release assets."""
         if GUI_AVAILABLE:
-            self.volumes_dir = Path(filedialog.askdirectory(title="Select Volumes Directory"))
+            selected = filedialog.askdirectory(title="Select RADXOID Release Assets")
         else:
-            self.volumes_dir = Path(input("Enter volumes directory path: "))
-        
-        if not self.volumes_dir.exists():
-            self.log("Error: Directory does not exist", "ERROR")
+            selected = input("Enter release-assets directory path: ").strip()
+        if not selected:
             return False
-        
-        self.log(f"Selected volumes directory: {self.volumes_dir}")
+        assets_dir = Path(selected)
+        if not assets_dir.is_dir():
+            self.log("Error: Assets directory does not exist", "ERROR")
+            return False
+        self.volumes_dir = assets_dir
+        self.verified_files.clear()
+        self.checksum_skipped = False
+        self.log(f"Selected release-assets directory: {self.volumes_dir}")
         return True
     
-    def select_output_dir(self):
-        """Select output directory"""
-        if GUI_AVAILABLE:
-            self.output_dir = Path(filedialog.askdirectory(title="Select Output Directory"))
-        else:
-            self.output_dir = Path(input("Enter output directory path: "))
-        
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.log(f"Selected output directory: {self.output_dir}")
-        return True
     
     def _has_mountpoints(self, node):
         """Return true when a disk or any child partition is mounted."""
-        if any(point for point in node.get("mountpoints", []) if point):
+        if any(point for point in (node.get("mountpoints") or []) if point):
             return True
-        return any(self._has_mountpoints(child) for child in node.get("children", []))
+        return any(
+            self._has_mountpoints(child)
+            for child in (node.get("children") or [])
+        )
 
     def _is_root_ancestor(self, device, root_source):
         """Return true when device contains the mounted root filesystem."""
         if not root_source:
             return False
-        result = subprocess.run(
-            ["lsblk", "-s", "-n", "-o", "PATH", device],
-            capture_output=True, text=True, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["lsblk", "-s", "-n", "-o", "PATH", device],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            self.log(f"Could not inspect root-disk ancestry: {error}", "ERROR")
+            return True
         return root_source in result.stdout.split()
 
     def _udev_properties(self, device):
-        if IS_MAC:
+        try:
+            result = subprocess.run(
+                ["udevadm", "info", "--query=property", "--name", device],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            self.log(f"Could not inspect SD-card identity: {error}", "ERROR")
             return {}
-        result = subprocess.run(
-            ["udevadm", "info", "--query=property", "--name", device],
-            capture_output=True, text=True, check=False,
-        )
         properties = {}
         for line in result.stdout.splitlines():
             key, separator, value = line.partition("=")
@@ -133,21 +152,44 @@ class RADXOIDInstaller:
         """Return removable SD-card whole disks that are writable and safe."""
         if IS_WINDOWS:
             script = (
-                "Get-Disk | Where-Object { "
-                "($_.BusType -eq 'SD' -or "
-                "($_.BusType -eq 'USB' -and $_.IsRemovable)) -and "
-                "-not $_.IsBoot -and -not $_.IsSystem -and "
-                "-not $_.IsReadOnly -and $_.OperationalStatus -eq 'Online' "
-                "} | Select-Object Number,Size,Model,BusType,IsRemovable | "
-                "ConvertTo-Json -Compress"
+                "$items=@(); Get-Disk | ForEach-Object { $disk=$_; "
+                "$drive=Get-CimInstance Win32_DiskDrive "
+                "-Filter ('Index=' + $disk.Number); "
+                "$removable=($disk.BusType -eq 'SD') -or "
+                "(($disk.BusType -eq 'USB') -and "
+                "($drive.MediaType -match 'Removable')); "
+                "if ($removable -and -not $disk.IsBoot -and "
+                "-not $disk.IsSystem -and -not $disk.IsReadOnly -and "
+                "-not $disk.IsOffline) { "
+                "$items += [pscustomobject]@{Number=$disk.Number; "
+                "Size=$disk.Size; Model=[string]$drive.Model; "
+                "BusType=[string]$disk.BusType; "
+                "UniqueId=[string]$disk.UniqueId; "
+                "SerialNumber=[string]$drive.SerialNumber} } }; "
+                "$items | ConvertTo-Json -Compress"
             )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, text=True, check=False,
-            )
-            if result.returncode != 0 or not result.stdout.strip():
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                    capture_output=True, text=True, check=False,
+                )
+            except OSError as error:
+                self.log(f"Could not start PowerShell: {error}", "ERROR")
                 return []
-            data = json.loads(result.stdout)
+            if result.returncode != 0:
+                self.log(
+                    f"Could not enumerate Windows SD cards: "
+                    f"{result.stderr.strip()}",
+                    "ERROR",
+                )
+                return []
+            if not result.stdout.strip():
+                return []
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as error:
+                self.log(f"Invalid Windows disk information: {error}", "ERROR")
+                return []
             if isinstance(data, dict):
                 data = [data]
             return [
@@ -158,24 +200,44 @@ class RADXOIDInstaller:
                     f"{item.get('Model', '').strip()} | "
                     f"{item.get('BusType', 'unknown')} removable",
                     "size": int(item.get("Size", 0)),
+                    "identity": (
+                        f"{item.get('UniqueId', '')}|"
+                        f"{item.get('SerialNumber', '')}"
+                    ),
                 }
                 for item in data
             ]
 
         if not IS_LINUX:
             return []
-        result = subprocess.run(
-            ["lsblk", "--json", "-o",
-             "PATH,NAME,TYPE,SIZE,RM,RO,TRAN,MOUNTPOINTS"],
-            capture_output=True, text=True, check=False,
-        )
-        if result.returncode != 0:
+        try:
+            result = subprocess.run(
+                ["lsblk", "--json", "-o",
+                 "PATH,NAME,TYPE,SIZE,RM,RO,TRAN,MOUNTPOINTS,MODEL,SERIAL,WWN"],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            self.log(f"Could not start lsblk: {error}", "ERROR")
             return []
-        root_source = subprocess.run(
-            ["findmnt", "-n", "-o", "SOURCE", "/"],
-            capture_output=True, text=True, check=False,
-        ).stdout.strip()
-        data = json.loads(result.stdout).get("blockdevices", [])
+        if result.returncode != 0:
+            self.log(
+                f"Could not enumerate Linux SD cards: {result.stderr.strip()}",
+                "ERROR",
+            )
+            return []
+        try:
+            root_source = subprocess.run(
+                ["findmnt", "-n", "-o", "SOURCE", "/"],
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+        except OSError as error:
+            self.log(f"Could not identify the system disk: {error}", "ERROR")
+            return []
+        try:
+            data = json.loads(result.stdout).get("blockdevices", [])
+        except json.JSONDecodeError as error:
+            self.log(f"Invalid Linux disk information: {error}", "ERROR")
+            return []
         devices = []
         for item in data:
             path = item.get("path")
@@ -192,11 +254,22 @@ class RADXOIDInstaller:
                 and not self._is_root_ancestor(path, root_source)
                 and is_sd_media
             ):
+                identity = "|".join(
+                    str(value or "")
+                    for value in (
+                        item.get("serial"),
+                        item.get("wwn"),
+                        props.get("ID_SERIAL_SHORT"),
+                        props.get("ID_SERIAL"),
+                    )
+                )
                 devices.append({
                     "path": path,
                     "label": f"{path} | {item.get('size', '')} | "
-                    f"SD{' mounted' if mounted else ''}",
+                    f"{(item.get('model') or 'SD').strip()}"
+                    f"{' mounted' if mounted else ''}",
                     "size": self._device_size(path),
+                    "identity": identity,
                 })
         return devices
 
@@ -210,91 +283,82 @@ class RADXOIDInstaller:
             self.log(f"  {index}. {device['label']}")
         try:
             selected = int(input("Select target number: ")) - 1
+            if selected < 0:
+                raise IndexError
             return devices[selected]["path"]
         except (ValueError, IndexError):
             self.log("Invalid target selection", "ERROR")
             return None
     
-    def prepare_output(self, progress_callback=None):
-        """Copy complete release assets; do not concatenate volumes."""
-        if not self.volumes_dir or not self.output_dir:
-            self.log("Error: Volumes or output directory not set", "ERROR")
-            return False
-        volumes_root = self.volumes_dir.resolve()
-        output_root = self.output_dir.resolve()
-        if output_root == volumes_root or volumes_root in output_root.parents:
-            self.log("Error: Output directory cannot be inside volumes directory", "ERROR")
-            return False
-
-        split_files = [
-            item for item in self.volumes_dir.iterdir()
-            if item.is_file()
-            and not item.is_symlink()
-            and item.name.rsplit(".", 1)[-1].isdigit()
-        ]
-        if split_files:
+    def inspect_sd_image(self):
+        """Return the verified GPT archive and its single raw-image member."""
+        if not self.volumes_dir:
+            self.log("Error: Release-assets directory is not selected", "ERROR")
+            return None
+        if self.verified_files:
+            candidates = [
+                path for path in self.verified_files
+                if path.suffix.lower() == ".zip"
+                and "gpt" in path.stem.lower()
+            ]
+        elif self.checksum_skipped:
+            candidates = [
+                path for path in self.volumes_dir.iterdir()
+                if path.is_file()
+                and not path.is_symlink()
+                and path.suffix.lower() == ".zip"
+                and "gpt" in path.stem.lower()
+            ]
+        else:
+            self.log("Error: Release assets have not been verified", "ERROR")
+            return None
+        if len(candidates) != 1:
             self.log(
-                "Error: split volume files are unsupported; use complete release assets",
+                f"Error: Expected exactly one verified GPT archive, found "
+                f"{len(candidates)}",
                 "ERROR",
             )
-            return False
+            return None
 
-        complete_files = [
-            item for item in self.volumes_dir.iterdir()
-            if item.is_file()
-            and not item.is_symlink()
-            and not item.name.startswith("SHA256SUMS")
-        ]
-        if not complete_files:
-            self.log("Error: No complete distribution files found", "ERROR")
-            return False
+        archive_path = candidates[0]
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                members = [
+                    info for info in archive.infolist()
+                    if not info.is_dir()
+                    and Path(info.filename).name.lower().endswith("gpt.img")
+                ]
+                if len(members) != 1:
+                    self.log(
+                        f"Error: Expected exactly one gpt.img in "
+                        f"{archive_path.name}, found {len(members)}",
+                        "ERROR",
+                    )
+                    return None
+                image_info = members[0]
+                if image_info.flag_bits & 0x1:
+                    self.log("Error: Encrypted GPT archives are unsupported", "ERROR")
+                    return None
+                if image_info.file_size <= 0:
+                    self.log("Error: GPT image is empty", "ERROR")
+                    return None
+        except (OSError, zipfile.BadZipFile, NotImplementedError) as error:
+            self.log(f"Error: Invalid GPT archive: {error}", "ERROR")
+            return None
 
-        total_bytes = sum(item.stat().st_size for item in complete_files)
-        processed_bytes = 0
-        if progress_callback:
-            progress_callback(0.0)
-        self.log("Preparing complete release assets; no concatenation required")
-
-        def advance(count):
-            nonlocal processed_bytes
-            processed_bytes += count
-            if progress_callback:
-                progress_callback(
-                    min(100.0, processed_bytes * 100.0 / total_bytes)
-                    if total_bytes else 100.0
-                )
-
-        for complete_file in complete_files:
-            destination_name = (
-                "update.img"
-                if complete_file.suffix.lower() == ".img"
-                and "rkupdate" in complete_file.stem.lower()
-                else complete_file.name
-            )
-            destination = self.output_dir / destination_name
-            if destination.exists() and destination.is_symlink():
-                raise ValueError(f"Refusing symlink output: {destination}")
-            temporary = destination.with_name(f".{destination.name}.partial")
-            try:
-                with open(temporary, "wb") as out_file, open(complete_file, "rb") as source:
-                    while chunk := source.read(4 * 1024 * 1024):
-                        out_file.write(chunk)
-                        advance(len(chunk))
-                os.replace(temporary, destination)
-                if destination.stat().st_size != complete_file.stat().st_size:
-                    raise IOError(f"Output size mismatch for {destination.name}")
-            except Exception:
-                temporary.unlink(missing_ok=True)
-                raise
-            self.log(f"Copied: {complete_file.name} -> {destination.name}")
-
-        if progress_callback:
-            progress_callback(100.0)
-        self.log(f"Output ready in directory: {self.output_dir}")
-        return True
+        self.log(
+            f"SD image: {Path(image_info.filename).name} from "
+            f"{archive_path.name} ({self._format_bytes(image_info.file_size)})"
+        )
+        return archive_path, image_info
     
     def verify_checksums(self, progress_callback=None, cancel_event=None):
         """Verify SHA256 checksums and reject unsafe manifest paths."""
+        if not self.volumes_dir:
+            self.log("Error: Release-assets directory is not selected", "ERROR")
+            return False
+        self.verified_files.clear()
+        self.checksum_skipped = False
         candidates = (
             "SHA256SUMS.txt",
             f"SHA256SUMS-{VERSION}.txt",
@@ -346,17 +410,20 @@ class RADXOIDInstaller:
 
         total_bytes = sum(filepath.stat().st_size for _, _, filepath in entries)
         processed_bytes = 0
+        verified_files = set()
         if progress_callback:
             progress_callback(0.0)
         self.log("Verifying checksums...")
         for expected_hash, filename, filepath in entries:
             if cancel_event and cancel_event.is_set():
+                self.checksum_skipped = True
                 self.log("WARNING: SHA-256 verification skipped by user", "WARNING")
                 return True
             sha256 = hashlib.sha256()
             with open(filepath, "rb") as source:
                 while chunk := source.read(4 * 1024 * 1024):
                     if cancel_event and cancel_event.is_set():
+                        self.checksum_skipped = True
                         self.log("WARNING: SHA-256 verification skipped by user", "WARNING")
                         return True
                     sha256.update(chunk)
@@ -371,7 +438,9 @@ class RADXOIDInstaller:
                 self.log(f"Error: {filename} (checksum mismatch)", "ERROR")
                 return False
             self.log(f"  OK {filename}")
+            verified_files.add(filepath)
 
+        self.verified_files = verified_files
         if progress_callback:
             progress_callback(100.0)
         self.log("All checksums verified successfully!")
@@ -379,28 +448,26 @@ class RADXOIDInstaller:
 
     def _device_size(self, device):
         """Return whole-device size in bytes, or zero when unknown."""
-        if IS_MAC:
+        try:
             result = subprocess.run(
-                ["diskutil", "info", "-plist", device],
+                ["lsblk", "-bno", "SIZE", device],
                 capture_output=True, text=True, check=False,
             )
-            match = re.search(r"<key>DiskSize</key>\s*<real>(\d+)</real>", result.stdout)
-            return int(match.group(1)) if match else 0
-        result = subprocess.run(
-            ["lsblk", "-bno", "SIZE", device],
-            capture_output=True, text=True, check=False,
-        )
-        try:
             return int(result.stdout.strip())
-        except ValueError:
+        except (OSError, ValueError) as error:
+            self.log(f"Could not determine device size for {device}: {error}", "ERROR")
             return 0
 
     def _unmount_partitions(self, device):
         """Unmount only mounted child partitions of the already-approved disk."""
-        result = subprocess.run(
-            ["lsblk", "--json", "-o", "PATH,TYPE,MOUNTPOINTS", device],
-            capture_output=True, text=True, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["lsblk", "--json", "-o", "PATH,TYPE,MOUNTPOINTS", device],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            self.log(f"Error: Could not inspect target partitions: {error}", "ERROR")
+            return False
         if result.returncode != 0:
             self.log("Error: Could not inspect target partitions", "ERROR")
             return False
@@ -415,9 +482,11 @@ class RADXOIDInstaller:
             for node in nodes:
                 if node.get("type") != "disk":
                     partitions.extend(
-                        mountpoint for mountpoint in node.get("mountpoints", []) if mountpoint
+                        mountpoint
+                        for mountpoint in (node.get("mountpoints") or [])
+                        if mountpoint
                     )
-                visit(node.get("children", []))
+                visit(node.get("children") or [])
         visit(tree)
         for mountpoint in partitions:
             try:
@@ -425,9 +494,13 @@ class RADXOIDInstaller:
             except PermissionError as error:
                 self.log(f"Error: {error}", "ERROR")
                 return False
-            result = subprocess.run(
-                command, capture_output=True, text=True, check=False
-            )
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, check=False
+                )
+            except OSError as error:
+                self.log(f"Error: Could not unmount {mountpoint}: {error}", "ERROR")
+                return False
             if result.returncode != 0:
                 self.log(
                     f"Error: Could not unmount {mountpoint}: "
@@ -446,12 +519,15 @@ class RADXOIDInstaller:
                 return f"{amount:.1f} {unit}"
             amount /= 1024
 
-    def _emit_flash_progress(self, callback, phase, processed, total, detail=None):
-        percent = min(100.0, processed * 100.0 / total) if total else 0.0
+    def _emit_flash_progress(
+        self, callback, phase, processed, total, detail=None, start=0.0, span=100.0
+    ):
+        phase_percent = min(100.0, processed * 100.0 / total) if total else 0.0
+        overall_percent = start + phase_percent * span / 100.0
         if detail is None:
             detail = f"{self._format_bytes(processed)} / {self._format_bytes(total)}"
         if callback:
-            callback(phase, percent, detail)
+            callback(phase, overall_percent, detail)
 
     def _privileged_command(self, command):
         if not IS_LINUX or os.geteuid() == 0:
@@ -485,16 +561,25 @@ class RADXOIDInstaller:
             return False
         script = (
             "$ErrorActionPreference='Stop'; "
-            f"$disk=Get-Disk -Number {number}; "
-            f"$disk | Get-Partition | Where-Object {{$_.DriveLetter}} | "
-            f"ForEach-Object {{ Remove-PartitionAccessPath "
-            f"-DiskNumber {number} -PartitionNumber $_.PartitionNumber "
-            f"-AccessPath ($_.DriveLetter + ':\\') -Confirm:$false }}"
+            f"$partitions=Get-Partition -DiskNumber {number}; "
+            "foreach ($partition in $partitions) { "
+            "foreach ($path in @($partition.AccessPaths)) { "
+            "if ($path -match '^[A-Za-z]:\\\\$') { "
+            "& mountvol.exe $path /p; "
+            "if ($LASTEXITCODE -ne 0) { throw \"mountvol failed for $path\" } "
+            "} elseif ($path -and $path -notmatch '^\\\\\\\\\\?\\\\Volume') { "
+            f"Remove-PartitionAccessPath -DiskNumber {number} "
+            "-PartitionNumber $partition.PartitionNumber "
+            "-AccessPath $path -Confirm:$false } } }"
         )
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError as error:
+            self.log(f"Error: Could not start PowerShell: {error}", "ERROR")
+            return False
         if result.returncode != 0:
             self.log(
                 f"Error: Could not dismount SD-card volumes: "
@@ -505,20 +590,6 @@ class RADXOIDInstaller:
         self.log(f"Unmounted volumes on PhysicalDrive{number}")
         return True
 
-    def _hash_file(self, path, progress_callback=None, phase="Hashing source image"):
-        digest = hashlib.sha256()
-        total = path.stat().st_size
-        processed = 0
-        if progress_callback:
-            self._emit_flash_progress(progress_callback, phase, 0, total)
-        with open(path, "rb") as source:
-            while chunk := source.read(4 * 1024 * 1024):
-                digest.update(chunk)
-                processed += len(chunk)
-                if progress_callback:
-                    self._emit_flash_progress(progress_callback, phase, processed, total)
-        return digest.hexdigest()
-
     def _hash_device_prefix(self, device, size, progress_callback=None):
         """Hash exactly the image-sized prefix of a raw device."""
         block_size = 4 * 1024 * 1024
@@ -526,8 +597,9 @@ class RADXOIDInstaller:
         remaining = size
         processed = 0
         phase = "Verifying SD-card readback"
-        if progress_callback:
-            self._emit_flash_progress(progress_callback, phase, 0, size)
+        self._emit_flash_progress(
+            progress_callback, phase, 0, size, start=50.0, span=50.0
+        )
 
         if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
             with open(device, "rb", buffering=0) as source:
@@ -538,96 +610,153 @@ class RADXOIDInstaller:
                     digest.update(chunk)
                     processed += len(chunk)
                     remaining -= len(chunk)
-                    if progress_callback:
-                        self._emit_flash_progress(progress_callback, phase, processed, size)
-            if remaining:
-                self.log("Error: SD-card readback ended before image size", "ERROR")
+                    self._emit_flash_progress(
+                        progress_callback,
+                        phase,
+                        processed,
+                        size,
+                        start=50.0,
+                        span=50.0,
+                    )
+        else:
+            command = self._privileged_command([
+                "dd", f"if={device}", "bs=4M", f"count={size}",
+                "iflag=count_bytes", "status=none",
+            ])
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            try:
+                while remaining:
+                    chunk = process.stdout.read(min(block_size, remaining))
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    processed += len(chunk)
+                    remaining -= len(chunk)
+                    self._emit_flash_progress(
+                        progress_callback,
+                        phase,
+                        processed,
+                        size,
+                        start=50.0,
+                        span=50.0,
+                    )
+                stderr = process.stderr.read()
+                process.wait()
+            except Exception:
+                process.kill()
+                process.wait()
+                raise
+            if process.returncode != 0:
+                self.log(
+                    f"Error: Could not verify written data: "
+                    f"{stderr.decode(errors='replace').strip()}",
+                    "ERROR",
+                )
                 return None
-            return digest.hexdigest()
 
-        count = (size + block_size - 1) // block_size
-        command = self._privileged_command(
-            ["dd", f"if={device}", "bs=4M", f"count={count}", "status=none"]
+        if remaining:
+            self.log("Error: SD-card readback ended before image size", "ERROR")
+            return None
+        return digest.hexdigest()
+
+    def _stream_gpt_direct(
+        self, archive_path, image_info, device, progress_callback
+    ):
+        """Decompress gpt.img directly to an already-authorized raw device."""
+        digest = hashlib.sha256()
+        processed = 0
+        size = image_info.file_size
+        self._emit_flash_progress(
+            progress_callback, "Writing gpt.img", 0, size, start=0.0, span=50.0
         )
+        with (
+            zipfile.ZipFile(archive_path) as archive,
+            archive.open(image_info) as source,
+            open(device, "r+b", buffering=0) as target,
+        ):
+            while chunk := source.read(4 * 1024 * 1024):
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = target.write(view)
+                    if not written:
+                        raise OSError(f"Short write to {device}")
+                    view = view[written:]
+                processed += len(chunk)
+                self._emit_flash_progress(
+                    progress_callback,
+                    "Writing gpt.img",
+                    processed,
+                    size,
+                    start=0.0,
+                    span=50.0,
+                )
+            target.flush()
+            os.fsync(target.fileno())
+        if processed != size:
+            raise OSError(
+                f"GPT image size mismatch: expected {size}, streamed {processed}"
+            )
+        return digest.hexdigest()
+
+    def _stream_gpt_with_dd(
+        self, archive_path, image_info, device, progress_callback
+    ):
+        """Decompress gpt.img into a privileged dd process."""
+        command = self._privileged_command([
+            "dd", f"of={device}", "bs=4M", "status=none", "conv=fsync",
+        ])
         process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        digest = hashlib.sha256()
+        processed = 0
+        size = image_info.file_size
+        self._emit_flash_progress(
+            progress_callback, "Writing gpt.img", 0, size, start=0.0, span=50.0
         )
         try:
-            while remaining:
-                chunk = process.stdout.read(min(block_size, remaining))
-                if not chunk:
-                    break
-                digest.update(chunk)
-                processed += len(chunk)
-                remaining -= len(chunk)
-                if progress_callback:
-                    self._emit_flash_progress(progress_callback, phase, processed, size)
-            _, stderr = process.communicate()
+            with (
+                zipfile.ZipFile(archive_path) as archive,
+                archive.open(image_info) as source,
+            ):
+                while chunk := source.read(4 * 1024 * 1024):
+                    process.stdin.write(chunk)
+                    digest.update(chunk)
+                    processed += len(chunk)
+                    self._emit_flash_progress(
+                        progress_callback,
+                        "Writing gpt.img",
+                        processed,
+                        size,
+                        start=0.0,
+                        span=50.0,
+                    )
+            process.stdin.close()
+            stderr = process.stderr.read()
+            process.wait()
         except Exception:
             process.kill()
             process.wait()
             raise
-        if process.returncode != 0 or remaining:
-            self.log(
-                f"Error: Could not verify written data: "
-                f"{stderr.decode(errors='replace').strip()}",
-                "ERROR",
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"SD-card write failed: {detail}")
+        if processed != size:
+            raise OSError(
+                f"GPT image size mismatch: expected {size}, streamed {processed}"
             )
-            return None
         return digest.hexdigest()
 
-    def _write_image_direct(self, image_file, device, size, progress_callback):
-        processed = 0
-        with open(image_file, "rb") as source, open(device, "r+b", buffering=0) as target:
-            while chunk := source.read(4 * 1024 * 1024):
-                written = target.write(chunk)
-                if written != len(chunk):
-                    raise IOError(f"Short write to {device}")
-                processed += written
-                self._emit_flash_progress(
-                    progress_callback, "Writing update.img", processed, size
-                )
-            target.flush()
-            os.fsync(target.fileno())
-
-    def _write_image_with_dd(self, image_file, device, size, progress_callback):
-        command = self._privileged_command([
-            "dd", f"if={image_file}", f"of={device}",
-            "bs=4M", "status=progress", "conv=fsync",
-        ])
-        process = subprocess.Popen(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-        )
-        stderr_tail = bytearray()
-        while True:
-            readable, _, _ = select.select([process.stderr], [], [], 0.2)
-            if readable:
-                chunk = process.stderr.read1(4096)
-                if chunk:
-                    stderr_tail.extend(chunk)
-                    for match in re.findall(rb"([0-9][0-9,]*)\s+bytes", chunk):
-                        processed = int(match.replace(b",", b""))
-                        self._emit_flash_progress(
-                            progress_callback, "Writing update.img", processed, size
-                        )
-            if process.poll() is not None:
-                remainder = process.stderr.read()
-                if remainder:
-                    stderr_tail.extend(remainder)
-                break
-        if process.returncode != 0:
-            detail = bytes(stderr_tail).decode(errors="replace").strip()
-            raise RuntimeError(f"SD-card write failed: {detail}")
-        self._emit_flash_progress(progress_callback, "Writing update.img", size, size)
-
     def flash_to_sd_card(self, device, progress_callback=None):
-        """Write update.img to a revalidated SD card and verify readback."""
+        """Stream the release GPT image to a revalidated SD card and verify it."""
         if not device:
             self.log("Error: No SD card device selected", "ERROR")
-            return False
-        image_file = self.output_dir / "update.img"
-        if not image_file.is_file() or image_file.is_symlink():
-            self.log("Error: Prepared update.img not found or unsafe", "ERROR")
             return False
         if not IS_WINDOWS and not IS_LINUX:
             self.log("Error: SD-card writing is supported on Windows and Linux", "ERROR")
@@ -636,23 +765,51 @@ class RADXOIDInstaller:
             self.log("Error: Run the installer as Administrator to write an SD card", "ERROR")
             return False
 
-        self._emit_flash_progress(progress_callback, "Validating target", 0, 1, "Revalidating SD card")
+        inspected = self.inspect_sd_image()
+        if not inspected:
+            return False
+        archive_path, image_info = inspected
+        image_size = image_info.file_size
+        if self.checksum_skipped:
+            self.log(
+                "WARNING: Writing an unauthenticated archive; only ZIP CRC and "
+                "post-write readback will be checked",
+                "WARNING",
+            )
+
+        self._emit_flash_progress(
+            progress_callback,
+            "Validating target",
+            0,
+            1,
+            "Revalidating SD card",
+        )
         safe_devices = {item["path"]: item for item in self.list_safe_devices()}
         selected = safe_devices.get(device)
         if not selected:
             self.log("Refusing target: it is not a detected removable SD disk", "ERROR")
             return False
-        image_size = image_file.stat().st_size
         initial_size = selected["size"]
+        initial_identity = selected.get("identity", "")
         if not initial_size or image_size > initial_size:
-            self.log("Refusing target: SD card is smaller than update.img", "ERROR")
+            self.log(
+                f"Refusing target: SD card is smaller than gpt.img "
+                f"({self._format_bytes(image_size)})",
+                "ERROR",
+            )
             return False
         self.log(
             f"Target validated: {device} ({self._format_bytes(initial_size)}), "
-            f"image {self._format_bytes(image_size)}"
+            f"gpt.img {self._format_bytes(image_size)}"
         )
 
-        self._emit_flash_progress(progress_callback, "Unmounting volumes", 0, 1, "Preparing target")
+        self._emit_flash_progress(
+            progress_callback,
+            "Unmounting volumes",
+            0,
+            1,
+            "Preparing target",
+        )
         if IS_WINDOWS:
             if not self._dismount_windows(device):
                 return False
@@ -661,193 +818,184 @@ class RADXOIDInstaller:
 
         refreshed = {item["path"]: item for item in self.list_safe_devices()}
         selected_after = refreshed.get(device)
-        if not selected_after or selected_after["size"] != initial_size:
+        if (
+            not selected_after
+            or selected_after["size"] != initial_size
+            or selected_after.get("identity", "") != initial_identity
+        ):
             self.log("Refusing target: device identity or size changed", "ERROR")
             return False
 
-        self.log(f"Writing {image_file.name} to {device}")
+        self.log(
+            f"Streaming {Path(image_info.filename).name} from "
+            f"{archive_path.name} to {device}"
+        )
         self.log("WARNING: This erases the entire selected SD card", "WARNING")
         try:
             if IS_WINDOWS or os.geteuid() == 0:
-                self._write_image_direct(image_file, device, image_size, progress_callback)
+                expected_hash = self._stream_gpt_direct(
+                    archive_path, image_info, device, progress_callback
+                )
             else:
-                self._write_image_with_dd(image_file, device, image_size, progress_callback)
-            self.log("Write complete; flushing buffers")
-            self._emit_flash_progress(progress_callback, "Flushing buffers", 1, 1)
+                expected_hash = self._stream_gpt_with_dd(
+                    archive_path, image_info, device, progress_callback
+                )
+            self.log("Write and ZIP CRC validation complete; verifying readback")
             if IS_LINUX:
                 subprocess.run(["sync"], check=False)
-
-            expected_hash = self._hash_file(
-                image_file, progress_callback, "Hashing source image"
-            )
             actual_hash = self._hash_device_prefix(
                 device, image_size, progress_callback
             )
             if actual_hash != expected_hash:
-                self.log("Error: Post-write verification failed", "ERROR")
+                self.log(
+                    f"Error: Post-write SHA-256 mismatch "
+                    f"(source {expected_hash}, readback {actual_hash})",
+                    "ERROR",
+                )
                 return False
-            self._emit_flash_progress(progress_callback, "Complete", 1, 1, "Verified successfully")
-            self.log("SD-card write and post-write verification completed successfully!")
+            self._emit_flash_progress(
+                progress_callback,
+                "Complete",
+                1,
+                1,
+                "GPT image verified successfully",
+            )
+            self.log(f"Verified SHA-256: {actual_hash}")
+            self.log("SD-card write and readback verification completed successfully!")
             return True
-        except Exception as error:
+        except (OSError, RuntimeError, zipfile.BadZipFile) as error:
             self.log(f"Error: {error}", "ERROR")
             return False
     
     
     def run(self):
-        """Run the installer"""
+        """Run the complete CLI workflow."""
         self.log(f"RADXOID Installer {VERSION}")
         self.log(f"Platform: {PLATFORM}")
-        self.log("")
-        
-        # Step 1: Select volumes directory
-        if not self.select_volumes_dir():
+        if self.log_path:
+            self.log(f"Session log: {self.log_path}")
+        if not self.select_volumes_dir() or not self.verify_checksums():
             return False
-        
-        # Step 2: Verify checksums
-        if not self.verify_checksums():
+        device = self.select_sd_card()
+        if not device:
             return False
-        
-        # Step 3: Select output directory
-        if not self.select_output_dir():
+        expected = f"ERASE {device}"
+        typed = input(
+            f"This permanently erases {device}. Type exactly '{expected}': "
+        )
+        if typed != expected:
+            self.log("SD-card write cancelled: confirmation did not match", "WARNING")
             return False
-        
-        # Step 4: Prepare complete output assets
-        if not self.prepare_output():
-            return False
-
-        self.log("\n✅ Output assets prepared successfully!")
-        self.log(f"Files are in: {self.output_dir}")
-        
-        return True
+        return self.flash_to_sd_card(device)
 
 
 class RADXOIDGUI:
-    """GUI for the installer"""
-    
+    """Three-step GUI for verification and destructive SD-card writing."""
+
     def __init__(self, root):
         self.root = root
         self.root.title(f"RADXOID Installer {VERSION}")
-        self.root.geometry("800x600")
+        self.root.geometry("900x680")
         self.root.resizable(True, True)
-        
-        # Set window icon (if available)
+        self.root.protocol("WM_DELETE_WINDOW", self.close_app)
         try:
-            self.root.iconbitmap(default='radxoid.ico')
-        except:
+            self.root.iconbitmap(default="radxoid.ico")
+        except (tk.TclError, OSError):
             pass
-        
-        # Installer instance
+
         self.installer = RADXOIDInstaller()
         self.operation_percent = 0.0
         self.progress_queue = queue.Queue()
         self.flash_progress_queue = queue.Queue()
-        self.ui_log_queue = queue.Queue()
+        self.worker_result_queue = queue.Queue()
+        self.running = True
+
         self.checksum_started = False
-        self.prepare_started = False
+        self.checksum_result = None
+        self.checksum_error = None
+        self.checksum_skipped = False
+        self.checksum_cancel = threading.Event()
         self.flash_started = False
         self.flash_result = None
         self.flash_error = None
-        # Create UI
+        self.sd_card_device = ""
+        self.device_options = {}
+        self._last_progress = -1.0
+
         self.create_ui()
-        
-        # Start log processing thread
-        self.running = True
-        self.log_thread = threading.Thread(target=self.process_logs, daemon=True)
-        self.log_thread.start()
-        self.root.after(100, self.process_progress)
-    
+        self.installer.log(f"RADXOID Installer {VERSION}")
+        self.installer.log(f"Platform: {PLATFORM}")
+        if self.installer.log_path:
+            self.installer.log(f"Session log: {self.installer.log_path}")
+        self.root.after(100, self.process_queues)
+
     def create_ui(self):
-        """Create the user interface"""
-        # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Title
-        title_label = ttk.Label(
+
+        ttk.Label(
             main_frame,
             text=f"RADXOID {VERSION} Installer",
-            font=('Helvetica', 16, 'bold')
-        )
-        title_label.pack(pady=10)
-        
-        # Description
-        desc_label = ttk.Label(
+            font=("Helvetica", 16, "bold"),
+        ).pack(pady=8)
+        ttk.Label(
             main_frame,
-            text="Lean Android 11 for Radxa ROCK 3A (RK3568) - Gaming & Emulation",
-            font=('Helvetica', 10)
-        )
-        desc_label.pack(pady=5)
-        
-        # Progress frame
+            text="Lean Android 11 for Radxa ROCK 3A (RK3568)",
+            font=("Helvetica", 10),
+        ).pack(pady=4)
+
         progress_frame = ttk.Frame(main_frame)
-        progress_frame.pack(fill=tk.X, pady=10)
-        
-        # Step indicators
-        self.steps = [
-            "Select Assets",
-            "Verify Checksums",
-            "Select Output",
-            "Prepare Output",
-            "Flash to SD Card"
-        ]
+        progress_frame.pack(fill=tk.X, pady=8)
+        self.steps = ["Select Assets", "Verify Checksums", "Write SD Card"]
         self.current_step = 0
-        
         self.step_labels = []
-        for i, step in enumerate(self.steps):
-            label = ttk.Label(progress_frame, text=step, padding=5)
-            label.grid(row=0, column=i, padx=5)
+        for index, step in enumerate(self.steps):
+            progress_frame.columnconfigure(index, weight=1)
+            label = ttk.Label(
+                progress_frame,
+                text=step,
+                padding=5,
+                anchor=tk.CENTER,
+            )
+            label.grid(row=0, column=index, sticky="ew", padx=5)
             self.step_labels.append(label)
-        
-        # Highlight current step
-        self.update_step_indicator()
-        
-        # Dynamic step content; log_text lives outside this frame so
-        # changing steps does not destroy the operation log.
+
         self.content_frame = ttk.Frame(main_frame)
-        self.content_frame.pack(fill=tk.X, pady=10)
+        self.content_frame.pack(fill=tk.X, pady=8)
 
         self.log_frame = ttk.LabelFrame(main_frame, text="Operation log")
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-
         self.log_text = scrolledtext.ScrolledText(
             self.log_frame,
             wrap=tk.WORD,
-            height=10,
-            state='disabled'
+            height=13,
+            state="disabled",
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        
-        # Button frame
+
         button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=10)
-        
-        # Buttons
+        button_frame.pack(fill=tk.X, pady=8)
         self.prev_button = ttk.Button(
             button_frame,
             text="Back",
             command=self.prev_step,
-            state='disabled'
+            state="disabled",
         )
         self.prev_button.pack(side=tk.LEFT, padx=5)
-        
         self.next_button = ttk.Button(
             button_frame,
             text="Next",
-            command=self.next_step
+            command=self.next_step,
         )
         self.next_button.pack(side=tk.RIGHT, padx=5)
-        
-        # Status bar
-        self.status_var = tk.StringVar()
-        self.status_var.set("Ready")
-        status_bar = ttk.Label(
+
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(
             main_frame,
             textvariable=self.status_var,
             relief=tk.SUNKEN,
-            anchor=tk.W
-        )
-        status_bar.pack(fill=tk.X, pady=(0, 10))
+            anchor=tk.W,
+        ).pack(fill=tk.X, pady=(0, 8))
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(
             main_frame,
@@ -856,275 +1004,290 @@ class RADXOIDGUI:
             mode="determinate",
         )
         self.progress_bar.pack(fill=tk.X, pady=(0, 5))
-        
-        # Start with step 0
+
+        self.update_step_indicator()
         self.update_content_frame()
-    
+
+    def checksum_busy(self):
+        return self.checksum_started and self.checksum_result is None
+
+    def flash_busy(self):
+        return self.flash_started and self.flash_result is None
+
     def update_step_indicator(self):
-        """Update step indicator"""
-        for i, label in enumerate(self.step_labels):
-            if i == self.current_step:
-                label.config(foreground='blue', font=('Helvetica', 10, 'bold'))
-            elif i < self.current_step:
-                label.config(foreground='green')
+        for index, label in enumerate(self.step_labels):
+            if index == self.current_step:
+                label.config(
+                    foreground="blue",
+                    font=("Helvetica", 10, "bold"),
+                )
+            elif index < self.current_step:
+                label.config(foreground="green", font=("Helvetica", 10))
             else:
-                label.config(foreground='gray')
-    
+                label.config(foreground="gray", font=("Helvetica", 10))
+
     def update_content_frame(self):
-        """Update the content based on current step"""
-        # Clear any existing content
         for widget in self.content_frame.winfo_children():
             widget.destroy()
-        
-        # Step 0: Select Volumes Directory
+        self.step_message_var = tk.StringVar()
+
         if self.current_step == 0:
+            self.step_message_var.set(
+                "Select the folder containing the RADXOID GPT ZIP and "
+                "SHA-256 manifest."
+            )
             ttk.Label(
                 self.content_frame,
-                text="Select the directory containing the volume files",
-                padding=5
+                textvariable=self.step_message_var,
+                padding=5,
+                wraplength=760,
             ).pack(pady=5)
-            
             ttk.Button(
                 self.content_frame,
-                text="Browse...",
-                command=self.browse_volumes
+                text="Browse release assets...",
+                command=self.browse_volumes,
             ).pack(pady=5)
-            
             if self.installer.volumes_dir:
                 ttk.Label(
                     self.content_frame,
                     text=f"Selected: {self.installer.volumes_dir}",
-                    foreground='green'
+                    foreground="green",
+                    wraplength=760,
                 ).pack(pady=5)
-        
-        # Step 1: Verify Checksums
+
         elif self.current_step == 1:
-            checksum_result = getattr(self, "checksum_result", None)
-            percent = int(self.operation_percent)
-            if checksum_result is None:
+            if self.checksum_result is None and self.checksum_skipped:
+                text = "Stopping SHA-256 verification safely..."
+                color = "darkorange"
+            elif self.checksum_result is None:
                 text = (
-                    f"Verifying checksums: {percent}% complete. "
-                    "Large images may take several minutes."
+                    f"Verifying release assets: {self.operation_percent:.1f}%. "
+                    "Do not close the installer."
                 )
                 color = "blue"
             elif self.checksum_skipped:
-                text = "SHA-256 verification skipped. Click Next to continue."
+                text = "SHA-256 verification was skipped. Click Next to continue."
                 color = "darkorange"
-            elif checksum_result:
-                text = "Checksums verified successfully. Click Next."
+            elif self.checksum_result:
+                text = "Release assets passed SHA-256 verification. Click Next."
                 color = "green"
             else:
-                text = f"Checksum verification failed: {self.checksum_error}"
+                text = (
+                    "SHA-256 verification failed. "
+                    f"{self.checksum_error or 'See the operation log.'}"
+                )
                 color = "red"
+            self.step_message_var.set(text)
             ttk.Label(
                 self.content_frame,
-                text=text,
+                textvariable=self.step_message_var,
                 foreground=color,
                 padding=5,
-                wraplength=650,
+                wraplength=760,
             ).pack(pady=5)
-            
             if not self.checksum_started:
-                self.checksum_result = None
                 self.checksum_started = True
-                threading.Thread(target=self.run_checksums, daemon=True).start()
-            if checksum_result is None:
+                threading.Thread(
+                    target=self.run_checksums,
+                    name="radxoid-checksum",
+                    daemon=True,
+                ).start()
+            if self.checksum_result is None and not self.checksum_skipped:
                 ttk.Button(
                     self.content_frame,
                     text="Skip SHA-256 verification (unsafe)",
                     command=self.skip_checksums,
                 ).pack(pady=5)
-        
-        # Step 2: Select Output Directory
-        elif self.current_step == 2:
-            ttk.Label(
-                self.content_frame,
-                text="Select the output directory for prepared release assets",
-                padding=5
-            ).pack(pady=5)
-            
-            ttk.Button(
-                self.content_frame,
-                text="Browse...",
-                command=self.browse_output
-            ).pack(pady=5)
-            
-            if self.installer.output_dir:
-                ttk.Label(
-                    self.content_frame,
-                    text=f"Selected: {self.installer.output_dir}",
-                    foreground='green'
-                ).pack(pady=5)
-        
-        # Step 3: Prepare complete output assets
-        elif self.current_step == 3:
-            prepare_result = getattr(self, "prepare_result", None)
-            percent = int(self.operation_percent)
-            if prepare_result is None:
-                text = f"Preparing complete assets: {percent}% complete."
-                color = "blue"
-            elif prepare_result:
-                text = "Output assets prepared successfully. Click Next."
-                color = "green"
-            else:
-                text = f"Output preparation failed: {self.prepare_error}"
-                color = "red"
-            ttk.Label(
-                self.content_frame,
-                text=text,
-                foreground=color,
-                padding=5,
-                wraplength=650,
-            ).pack(pady=5)
 
-            if not self.prepare_started:
-                self.prepare_result = None
-                self.prepare_started = True
-                threading.Thread(target=self.run_prepare, daemon=True).start()
-            elif self.prepare_result and self.installer.output_dir:
-                ttk.Button(
-                    self.content_frame,
-                    text="Open output folder",
-                    command=self.open_output,
-                ).pack(pady=10)
-        # Step 4: Write update.img to the SD card
-        elif self.current_step == 4:
-            flash_result = getattr(self, "flash_result", None)
+        else:
             if not self.flash_started:
-                text = "Select an SD card, then start the fully verified write."
+                text = (
+                    "Select a removable SD card. The installer streams gpt.img "
+                    "from the verified GPT ZIP, then reads it back and verifies SHA-256."
+                )
                 color = "blue"
-            elif flash_result is None:
-                text = "Writing and verifying update.img. Do not remove the SD card."
+            elif self.flash_result is None:
+                text = (
+                    "Writing and verifying gpt.img. Do not remove the SD card, "
+                    "close the installer, or power off the computer."
+                )
                 color = "blue"
-            elif flash_result:
-                text = "SD-card write and verification completed successfully."
+            elif self.flash_result:
+                text = "SD-card write and readback verification completed successfully."
                 color = "green"
             else:
-                text = f"SD-card write failed: {self.flash_error}"
+                text = (
+                    "SD-card write failed. "
+                    f"{self.flash_error or 'See the operation log.'}"
+                )
                 color = "red"
+            self.step_message_var.set(text)
             ttk.Label(
                 self.content_frame,
-                text=text,
+                textvariable=self.step_message_var,
                 foreground=color,
                 padding=5,
-                wraplength=650,
+                wraplength=760,
             ).pack(pady=5)
             ttk.Button(
                 self.content_frame,
                 text="Refresh SD-card list",
                 command=self.refresh_devices,
-                state="disabled" if self.flash_started and flash_result is None else "normal",
+                state="disabled" if self.flash_busy() else "normal",
             ).pack(pady=5)
 
-            if IS_WINDOWS:
+            if IS_WINDOWS and not self.installer._windows_is_admin():
                 ttk.Label(
                     self.content_frame,
-                    text="Windows write requires Administrator. "
-                    "The selected physical disk will be erased.",
-                    foreground="blue",
+                    text=(
+                        "Administrator privileges are required. Use the packaged "
+                        "installer, which requests them when it starts."
+                    ),
+                    foreground="red",
                     padding=5,
-                    wraplength=650,
+                    wraplength=760,
                 ).pack(pady=5)
 
             devices = self.installer.list_safe_devices()
+            self.device_options = {
+                item["label"]: item["path"] for item in devices
+            }
+            if self.sd_card_device not in self.device_options.values():
+                self.sd_card_device = ""
             if not devices:
                 ttk.Label(
                     self.content_frame,
-                    text="No removable writable SD-card device detected.",
+                    text=(
+                        "No writable removable SD card detected. Insert the card "
+                        "and click Refresh SD-card list."
+                    ),
                     foreground="red",
                     padding=5,
+                    wraplength=760,
                 ).pack(pady=5)
             else:
                 ttk.Label(
                     self.content_frame,
-                    text="Only removable SD-card candidates are shown. "
-                    "System and boot disks are excluded.",
+                    text=(
+                        "Only removable SD-card whole disks are listed. "
+                        "System and boot disks are excluded."
+                    ),
                     foreground="green",
                     padding=5,
-                    wraplength=650,
+                    wraplength=760,
                 ).pack(pady=5)
-                self.device_options = {
-                    item["label"]: item["path"] for item in devices
-                }
                 self.device_var = tk.StringVar()
                 self.device_combo = ttk.Combobox(
                     self.content_frame,
                     textvariable=self.device_var,
                     values=list(self.device_options),
-                    state="disabled" if self.flash_started and flash_result is None else "readonly",
-                    width=78,
+                    state="disabled" if self.flash_busy() else "readonly",
+                    width=88,
                 )
                 self.device_combo.pack(pady=5)
                 ttk.Button(
                     self.content_frame,
                     text="Select target",
                     command=self.select_gui_device,
-                    state="disabled" if self.flash_started and flash_result is None else "normal",
+                    state="disabled" if self.flash_busy() else "normal",
                 ).pack(pady=5)
-                ttk.Label(
-                    self.content_frame,
-                    text="This erases the selected whole disk. "
-                    "The final dialog requires typing ERASE <device>.",
-                    foreground="red",
-                    padding=5,
-                    wraplength=650,
-                ).pack(pady=5)
-                if getattr(self, "sd_card_device", ""):
+                if self.sd_card_device:
                     ttk.Label(
                         self.content_frame,
-                        text=f"Selected: {self.sd_card_device}",
-                        foreground="green",
+                        text=f"Selected whole disk: {self.sd_card_device}",
+                        foreground="red",
                     ).pack(pady=5)
-                    self.flash_button = ttk.Button(
+                    ttk.Button(
                         self.content_frame,
-                        text="Write update.img to SD card",
+                        text="Write and verify gpt.img",
                         command=self.run_flash,
-                        state="disabled" if self.flash_started and flash_result is None else "normal",
-                    )
-                    self.flash_button.pack(pady=5)
-        busy = (
-            (self.current_step == 1 and getattr(self, "checksum_result", None) is None)
-            or (self.current_step == 3 and getattr(self, "prepare_result", None) is None)
-            or (self.current_step == 4 and getattr(self, "flash_result", None) is None)
-        )
-        blocked = (
-            (self.current_step == 1 and getattr(self, "checksum_result", None) is not True)
-            or (self.current_step == 3 and getattr(self, "prepare_result", None) is not True)
-            or (self.current_step == 4 and getattr(self, "flash_result", None) is not True)
-        )
-        self.progress_bar.stop()
-        self.progress_bar.config(mode="determinate")
-        if self.current_step in (1, 3, 4):
-            self.progress_var.set(self.operation_percent)
-        else:
-            self.progress_var.set(0)
-        if self.current_step == len(self.steps) - 1:
-            self.next_button.config(
-                text="Close",
-                state="normal" if not blocked else "disabled",
+                        state="disabled" if self.flash_busy() else "normal",
+                    ).pack(pady=5)
+
+        busy = self.checksum_busy() or self.flash_busy()
+        self.prev_button.config(
+            state=(
+                "disabled"
+                if self.current_step == 0 or busy
+                else "normal"
             )
+        )
+        if self.current_step == 0:
+            next_enabled = bool(self.installer.volumes_dir)
+        elif self.current_step == 1:
+            next_enabled = self.checksum_result is True
         else:
-            self.next_button.config(state="disabled" if blocked else "normal")
+            next_enabled = self.flash_result is True
+        self.next_button.config(
+            text="Close" if self.current_step == len(self.steps) - 1 else "Next",
+            state="normal" if next_enabled else "disabled",
+        )
+        self.progress_var.set(
+            self.operation_percent if self.current_step in (1, 2) else 0.0
+        )
 
     def _report_progress(self, label, value):
-        """Queue a percentage update from a worker thread."""
         percent = max(0.0, min(100.0, float(value)))
         if percent - self._last_progress < 0.1 and percent < 100.0:
             return
         self._last_progress = percent
         self.progress_queue.put((label, percent))
+
     def _report_flash_progress(self, phase, percent, detail):
-        """Queue detailed SD-card progress from the worker thread."""
         self.flash_progress_queue.put((phase, percent, detail))
 
+    def _apply_progress(self, label, percent):
+        self.operation_percent = percent
+        self.progress_var.set(percent)
+        self.status_var.set(f"{label}: {percent:.1f}%")
+        if (
+            self.current_step == 1
+            and self.checksum_result is None
+            and not self.checksum_skipped
+        ):
+            self.step_message_var.set(
+                f"Verifying release assets: {percent:.1f}%. "
+                "Do not close the installer."
+            )
+
     def _apply_flash_progress(self, phase, percent, detail):
-        """Show the current SD-card phase, bytes, and percentage."""
         self.operation_percent = percent
         self.progress_var.set(percent)
         self.status_var.set(f"{phase}: {detail} ({percent:.1f}%)")
+        if self.current_step == 2 and self.flash_result is None:
+            self.step_message_var.set(
+                f"{phase}: {detail} ({percent:.1f}%). "
+                "Do not remove the SD card."
+            )
 
-    def process_progress(self):
-        """Apply queued progress updates on Tk's main thread."""
+    def _append_log(self, message):
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state="disabled")
+
+    def _apply_worker_result(self, kind, result, error, skipped=False):
+        if kind == "checksum":
+            self.checksum_skipped = self.checksum_skipped or skipped
+            self.checksum_result = True if self.checksum_skipped else result
+            self.checksum_error = error
+        elif kind == "flash":
+            self.flash_result = result
+            self.flash_error = error
+            if result:
+                messagebox.showinfo(
+                    "RADXOID SD card ready",
+                    "gpt.img was written and verified successfully. "
+                    "Safely eject the SD card before removing it.",
+                )
+            else:
+                messagebox.showerror(
+                    "SD-card write failed",
+                    error or "See the operation log for details.",
+                )
+        self.update_content_frame()
+
+    def process_queues(self):
         try:
             while True:
                 label, percent = self.progress_queue.get_nowait()
@@ -1137,286 +1300,199 @@ class RADXOIDGUI:
                 self._apply_flash_progress(phase, percent, detail)
         except queue.Empty:
             pass
-        if getattr(self, "running", False):
-            self.root.after(100, self.process_progress)
+        try:
+            while True:
+                message = self.installer.log_queue.get_nowait()
+                self._append_log(message)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self._apply_worker_result(*self.worker_result_queue.get_nowait())
+        except queue.Empty:
+            pass
+        if self.running:
+            self.root.after(100, self.process_queues)
 
-    def _apply_progress(self, label, percent):
-        """Update the visible progress bar and status text."""
-        self.operation_percent = percent
-        self.progress_var.set(percent)
-        self.status_var.set(f"{label}: {percent:.1f}%")
-
-    def _append_log(self, message):
-        """Append a log message on Tk's main thread."""
-        self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state='disabled')
-        if not (self.flash_started and self.flash_result is None):
-            self.status_var.set(message.split(']')[-1].strip())
-
-    def process_logs(self):
-        """Process log messages from the installer."""
-        while self.running:
-            try:
-                message = self.installer.log_queue.get(timeout=0.1)
-                self.ui_log_queue.put(message)
-            except queue.Empty:
-                pass
-    
     def browse_volumes(self):
-        """Browse for volumes directory"""
         if self.installer.select_volumes_dir():
             self.update_content_frame()
-    
-    def browse_output(self):
-        """Browse for output directory"""
-        if self.installer.select_output_dir():
-            self.update_content_frame()
-    def open_output(self):
-        """Open the prepared-output directory in the platform file manager."""
-        output_dir = self.installer.output_dir
-        if not output_dir:
-            return
-        try:
-            if IS_WINDOWS:
-                os.startfile(str(output_dir))
-            else:
-                subprocess.Popen(["xdg-open", str(output_dir)])
-        except (OSError, AttributeError) as error:
-            self.installer.log(f"Could not open output directory: {error}", "WARNING")
 
     def refresh_devices(self):
-        """Refresh the removable SD-card list after insertion or removal."""
-        self.sd_card_device = ""
-        self.update_content_frame()
-    
+        if not self.flash_busy():
+            self.sd_card_device = ""
+            self.update_content_frame()
+
     def skip_checksums(self):
-        """Skip checksum verification only after explicit confirmation."""
         confirmed = messagebox.askyesno(
             "Skip SHA-256 verification?",
-            "This bypasses integrity verification. Continue only if the "
-            "files came from the official RADXOID release.",
+            "Integrity verification protects against corrupted or modified images. "
+            "Continue only if the files came directly from the official release.",
         )
         if not confirmed:
             return
         self.checksum_skipped = True
         self.checksum_cancel.set()
-        self.checksum_result = True
-        self.operation_percent = 100.0
-        self.installer.log("WARNING: SHA-256 verification skipped by user", "WARNING")
-        self.root.after(0, self.update_content_frame)
+        self.installer.checksum_skipped = True
+        self.installer.log(
+            "WARNING: SHA-256 verification skipped by user",
+            "WARNING",
+        )
+        self.update_content_frame()
 
     def run_checksums(self):
-        """Run checksum verification."""
-        self.installer.log("Starting checksum verification...")
+        self.installer.log("Starting SHA-256 verification")
+        result = False
+        error = None
         try:
-            self.checksum_result = self.installer.verify_checksums(
-                progress_callback=lambda value: self._report_progress("SHA-256", value),
+            result = self.installer.verify_checksums(
+                progress_callback=lambda value: self._report_progress(
+                    "SHA-256",
+                    value,
+                ),
                 cancel_event=self.checksum_cancel,
             )
-            if self.checksum_cancel.is_set():
-                self.checksum_skipped = True
-        except Exception as error:
-            self.checksum_error = str(error)
-            self.checksum_result = False
-            self.installer.log(f"Checksum verification failed: {error}", "ERROR")
-        self.installer.log("Checksum verification completed")
-        self.root.after(0, self.update_content_frame)
-    
-    def run_prepare(self):
-        """Prepare complete release assets in the selected output directory."""
-        self.installer.log("Starting output preparation...")
-        try:
-            self.prepare_result = self.installer.prepare_output(
-                progress_callback=lambda value: self._report_progress("Prepare", value),
+        except Exception as exception:  # noqa: BLE001 - worker boundary
+            error = str(exception)
+            self.installer.log(
+                f"SHA-256 verification failed: {exception}",
+                "ERROR",
             )
-        except Exception as error:
-            self.prepare_error = str(error)
-            self.prepare_result = False
-            self.installer.log(f"Output preparation failed: {error}", "ERROR")
-        self.installer.log("Output preparation completed")
-        self.root.after(0, self.update_content_frame)
-    
+        self.worker_result_queue.put(
+            (
+                "checksum",
+                result,
+                error,
+                self.installer.checksum_skipped,
+            )
+        )
+
     def select_gui_device(self):
-        """Store the device selected in the safe-device combobox."""
-        label = self.device_var.get()
-        device = self.device_options.get(label)
+        device = self.device_options.get(self.device_var.get())
         if device:
             self.sd_card_device = device
             self.update_content_frame()
 
     def run_flash(self):
-        """Confirm the destructive write, then run it off the GUI thread."""
-        if self.flash_started and self.flash_result is None:
+        if self.flash_busy():
             return
-        device = getattr(self, "sd_card_device", "")
+        device = self.sd_card_device
         if not device:
-            messagebox.showerror("Error", "Select an SD-card target first.")
+            messagebox.showerror("No target", "Select an SD-card target first.")
             return
+        inspected = self.installer.inspect_sd_image()
+        if not inspected:
+            messagebox.showerror(
+                "Invalid release assets",
+                "No usable verified GPT image was found. See the operation log.",
+            )
+            return
+        image_size = inspected[1].file_size
         expected = f"ERASE {device}"
         typed = simpledialog.askstring(
-            "Final confirmation",
-            f"This erases the whole removable disk:\n\n{device}\n\n"
+            "Final destructive-write confirmation",
+            f"The whole disk {device} will be erased.\n"
+            f"Image size: {self.installer._format_bytes(image_size)}\n\n"
             f"Type exactly:\n{expected}",
         )
         if typed != expected:
-            messagebox.showerror("Cancelled", "Exact confirmation did not match.")
+            messagebox.showwarning(
+                "Write cancelled",
+                "The exact confirmation did not match. Nothing was written.",
+            )
             return
         self.flash_started = True
         self.flash_result = None
         self.flash_error = None
         self.operation_percent = 0.0
         self.flash_progress_queue = queue.Queue()
-        self.installer.log(f"Starting GUI SD-card write to {device}...")
+        self.installer.log(f"Starting SD-card write to {device}")
         self.update_content_frame()
         threading.Thread(
             target=self.run_flash_worker,
             args=(device,),
-            daemon=True,
+            name="radxoid-sd-writer",
+            daemon=False,
         ).start()
 
     def run_flash_worker(self, device):
-        """Write and verify the SD card without blocking Tk."""
+        result = False
+        error = None
         try:
-            self.flash_result = self.installer.flash_to_sd_card(
+            result = self.installer.flash_to_sd_card(
                 device,
                 progress_callback=self._report_flash_progress,
             )
-        except Exception as error:
-            self.flash_error = str(error)
-            self.flash_result = False
-            self.installer.log(f"SD-card write failed: {error}", "ERROR")
-        self.installer.log("GUI SD-card write operation completed")
-        self.root.after(0, self.update_content_frame)
-        if self.flash_result:
-            self.root.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "Success",
-                    "update.img was written and verified successfully.",
-                ),
-            )
-        else:
-            self.root.after(
-                0,
-                lambda: messagebox.showerror(
-                    "SD-card write failed",
-                    self.flash_error or "See the operation log for details.",
-                ),
-            )
-    
+            if not result:
+                error = "The write or readback verification failed."
+        except Exception as exception:  # noqa: BLE001 - worker boundary
+            error = str(exception)
+            self.installer.log(f"SD-card write failed: {exception}", "ERROR")
+        self.worker_result_queue.put(("flash", result, error))
+
     def next_step(self):
-        """Advance the workflow or close after a verified flash."""
         if self.current_step == len(self.steps) - 1:
             if self.flash_result is True:
-                self.root.destroy()
+                self.close_app()
             return
-        # Validate current step
-        if self.current_step == 0 and not self.installer.volumes_dir:
-            messagebox.showerror("Error", "Please select volumes directory")
-            return
-        
-        if self.current_step == 1:
-            if not hasattr(self, 'checksum_result') or self.checksum_result is None:
-                messagebox.showerror("Error", "Checksum verification in progress...")
-                return
-            if not self.checksum_result:
-                messagebox.showerror(
-                    "Checksum verification failed",
-                    self.checksum_error or "See the installer log for details.",
-                )
-                return
-        
-        if self.current_step == 2 and not self.installer.output_dir:
-            messagebox.showerror("Error", "Please select output directory")
-            return
-        
-        if self.current_step == 3:
-            if not hasattr(self, 'prepare_result') or self.prepare_result is None:
-                messagebox.showerror("Error", "Output preparation in progress...")
-                return
-            if not self.prepare_result:
-                messagebox.showerror(
-                    "Output preparation failed",
-                    self.prepare_error or "Choose an output folder outside the source folder.",
-                )
-                return
-        
         if self.current_step == 0:
+            if not self.installer.volumes_dir:
+                messagebox.showerror(
+                    "Release assets required",
+                    "Select the release-assets folder first.",
+                )
+                return
+            self.checksum_started = False
             self.checksum_result = None
             self.checksum_error = None
             self.checksum_skipped = False
             self.checksum_cancel = threading.Event()
-            self.checksum_started = False
             self.operation_percent = 0.0
-            self._last_progress = -1
-        elif self.current_step == 2:
-            self.prepare_result = None
-            self.prepare_error = None
-            self.prepare_started = False
+            self._last_progress = -1.0
+        elif self.current_step == 1:
+            if self.checksum_result is not True:
+                return
+            self.flash_started = False
+            self.flash_result = None
+            self.flash_error = None
             self.operation_percent = 0.0
-            self._last_progress = -1
-        # Move to next step
+            self.sd_card_device = ""
         self.current_step += 1
         self.update_step_indicator()
         self.update_content_frame()
-        
-        # Update buttons
-        self.prev_button.config(state='normal')
-        
-        if self.current_step == len(self.steps) - 1:
-            self.next_button.config(text="Finish")
-    
+
     def prev_step(self):
-        """Go to previous step"""
-        if self.current_step > 0:
-            self.current_step -= 1
-            self.update_step_indicator()
-            self.update_content_frame()
-            
-            if self.current_step < len(self.steps) - 1:
-                self.next_button.config(text="Next")
-    
+        if self.current_step == 0 or self.checksum_busy() or self.flash_busy():
+            return
+        self.current_step -= 1
+        self.update_step_indicator()
+        self.update_content_frame()
+
+    def close_app(self):
+        if self.flash_busy():
+            messagebox.showwarning(
+                "Write in progress",
+                "The SD-card write is still running. Closing now could corrupt "
+                "the card, so the installer will remain open.",
+            )
+            return
+        self.running = False
+        self.root.destroy()
+
     def run_app(self):
-        """Run the GUI application"""
         self.root.mainloop()
 
 
 def main():
-    """Main entry point"""
     if GUI_AVAILABLE:
-        # Run GUI
         root = tk.Tk()
-        app = RADXOIDGUI(root)
-        app.run_app()
+        RADXOIDGUI(root).run_app()
     else:
-        # Run CLI
         print("RADXOID Installer - CLI Mode")
         print(f"Version: {VERSION}")
         print(f"Platform: {PLATFORM}")
-        print()
-        
-        installer = RADXOIDInstaller()
-        
-        # Run steps
-        if installer.select_volumes_dir():
-            if installer.verify_checksums():
-                if installer.select_output_dir():
-                    if installer.prepare_output():
-                        print("\n✅ Output assets prepared!")
-                        print(f"Files are in: {installer.output_dir}")
-                        
-                        # Ask if user wants to flash
-                        if IS_WINDOWS:
-                            print("\nNote: Windows raw flashing is disabled. "
-                                  "Flash update.img with Rufus or Etcher.")
-                        else:
-                            device = installer.select_sd_card()
-                            if device:
-                                if input(f"Flash to {device}? This will ERASE all data! (y/n): ").lower() == 'y':
-                                    installer.flash_to_sd_card(device)
-    
+        RADXOIDInstaller().run()
+
 
 if __name__ == "__main__":
     main()
