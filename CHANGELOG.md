@@ -1,5 +1,24 @@
 # RADXOID Changelog
 
+## [v1.0.20] - Keep Windows removable media online
+
+### Fixed
+- Replaces `mountvol /p`, which took the SD volume offline and caused the first
+  `WriteFile` call to fail with Windows error 21 (`The device is not ready`).
+- Removes mount points without offlining the disk, then holds
+  `FSCTL_LOCK_VOLUME` and `FSCTL_DISMOUNT_VOLUME` handles throughout writing
+  and SHA-256 readback.
+
+### Diagnostics
+- Reports native errors as explicit `Windows error N` messages rather than
+  misleading POSIX-derived exception names such as `IsADirectoryError`.
+- Tells the user to close Explorer or another process when volume locking fails.
+
+### Verification
+- Confirms that `/p` is absent, both volume control codes are issued, and every
+  lock is released after success or failure.
+
+
 ## [v1.0.19] - Win32 I/O without the C runtime
 
 ### Fixed

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import importlib.util
 import os
 import tempfile
@@ -183,53 +184,108 @@ class InstallerBackendTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                OSError,
+                RuntimeError,
                 r"CreateFileW could not open \\\\\.\\PhysicalDrive7 "
-                r"for raw write: Access is denied\.",
+                r"for raw write \(Windows error 5\): Access is denied\.",
             ):
                 self.installer._open_windows_device(
                     r"\\.\PhysicalDrive7",
                     writable=True,
                 )
 
-    def test_raw_write_error_is_preserved_for_the_gui(self):
+    def test_windows_volume_is_locked_without_taking_disk_offline(self):
+        volume_guid = r"\\?\Volume{test-volume}" + "\\"
+        completed = CompletedProcess([], 0, json.dumps([volume_guid]), "")
+        kernel32 = SimpleNamespace(
+            CreateFileW=Mock(return_value=456),
+            DeviceIoControl=Mock(return_value=True),
+            CloseHandle=Mock(return_value=True),
+        )
+        with (
+            patch.object(
+                self.installer,
+                "_powershell_executable",
+                return_value="powershell.exe",
+            ),
+            patch.object(
+                installer_module.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+            patch.object(
+                installer_module.ctypes,
+                "WinDLL",
+                create=True,
+                return_value=kernel32,
+            ),
+        ):
+            locks = self.installer._lock_windows_volumes(
+                r"\\.\PhysicalDrive7"
+            )
+
+        self.assertEqual(locks, [(kernel32, 456, r"\\.\Volume{test-volume}")])
+        script = run.call_args.args[0][-1]
+        self.assertNotIn("mountvol.exe", script)
+        self.assertNotIn("/p", script)
+        self.assertIn("Remove-PartitionAccessPath", script)
+        kernel32.CreateFileW.assert_called_once_with(
+            r"\\.\Volume{test-volume}",
+            0xC0000000,
+            0x00000003,
+            None,
+            3,
+            0,
+            None,
+        )
+        controls = [
+            call.args[1] for call in kernel32.DeviceIoControl.call_args_list
+        ]
+        self.assertEqual(controls, [0x00090018, 0x00090020])
+        self.installer._release_windows_volume_locks(locks)
+        kernel32.CloseHandle.assert_called_once_with(456)
+
+    def test_raw_write_error_is_preserved_and_volume_lock_released(self):
         self.assertTrue(self.installer.verify_checksums())
-        target = self.root / "permission-denied-card.bin"
-        target.write_bytes(b"\0" * (len(self.payload) + 1024))
+        target = r"\\.\PhysicalDrive7"
         device = {
-            "path": str(target),
+            "path": target,
             "label": "test removable SD",
-            "size": target.stat().st_size,
+            "size": len(self.payload) + 1024,
             "identity": "permission-card",
         }
+        locks = [(Mock(), 456, r"\\.\Volume{test-volume}")]
         with (
-            patch.object(installer_module, "IS_WINDOWS", False),
-            patch.object(installer_module, "IS_LINUX", True),
+            patch.object(installer_module, "IS_WINDOWS", True),
+            patch.object(installer_module, "IS_LINUX", False),
+            patch.object(self.installer, "_windows_is_admin", return_value=True),
             patch.object(
                 self.installer,
                 "list_safe_devices",
                 side_effect=[[device], [device]],
             ),
-            patch.object(self.installer, "_unmount_partitions", return_value=True),
             patch.object(
-                installer_module.os,
-                "geteuid",
-                return_value=0,
-                create=True,
+                self.installer,
+                "_lock_windows_volumes",
+                return_value=locks,
             ),
+            patch.object(
+                self.installer,
+                "_release_windows_volume_locks",
+            ) as release,
             patch.object(
                 self.installer,
                 "_stream_gpt_direct",
                 side_effect=PermissionError(13, "Permission denied"),
             ),
         ):
-            result = self.installer.flash_to_sd_card(str(target))
+            result = self.installer.flash_to_sd_card(target)
 
         self.assertFalse(result)
         self.assertEqual(
             self.installer.last_error,
             "PermissionError: [Errno 13] Permission denied",
         )
+        release.assert_called_once_with(locks)
 
     def test_refuses_target_smaller_than_uncompressed_image(self):
         self.assertTrue(self.installer.verify_checksums())

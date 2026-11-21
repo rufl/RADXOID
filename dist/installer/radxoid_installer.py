@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.19"
+VERSION = "v1.0.20"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -47,9 +47,9 @@ class _WindowsRawDevice:
     def _raise_last_error(self, operation):
         error_code = ctypes.get_last_error()
         detail = ctypes.FormatError(error_code).strip()
-        raise OSError(
-            error_code,
-            f"{operation} failed for {self._path}: {detail}",
+        raise RuntimeError(
+            f"{operation} failed for {self._path} "
+            f"(Windows error {error_code}): {detail}"
         )
 
     def readinto(self, buffer):
@@ -769,9 +769,9 @@ class RADXOIDInstaller:
             error_code = ctypes.get_last_error()
             action = "write" if writable else "read"
             detail = ctypes.FormatError(error_code).strip()
-            raise OSError(
-                error_code,
-                f"CreateFileW could not open {device} for raw {action}: {detail}",
+            raise RuntimeError(
+                f"CreateFileW could not open {device} for raw {action} "
+                f"(Windows error {error_code}): {detail}"
             )
         return _WindowsRawDevice(kernel32, handle, device, writable)
 
@@ -786,28 +786,34 @@ class RADXOIDInstaller:
         if not IS_WINDOWS:
             os.fsync(target.fileno())
 
-    def _dismount_windows(self, device):
+    @staticmethod
+    def _release_windows_volume_locks(locks):
+        for kernel32, handle, _path in reversed(locks):
+            kernel32.CloseHandle(handle)
+
+    def _lock_windows_volumes(self, device):
+        """Remove mount points, lock each volume, and keep it dismounted."""
         number = self._windows_disk_number(device)
         if number is None:
             self.log("Error: Invalid Windows physical-disk path", "ERROR")
-            return False
+            return None
         script = (
-            "$ErrorActionPreference='Stop'; "
+            "$ErrorActionPreference='Stop'; $volumePaths=@(); "
             f"$partitions=Get-Partition -DiskNumber {number}; "
             "foreach ($partition in $partitions) { "
             "foreach ($path in @($partition.AccessPaths)) { "
-            "if ($path -match '^[A-Za-z]:\\\\$') { "
-            "& mountvol.exe $path /p; "
-            "if ($LASTEXITCODE -ne 0) { throw \"mountvol failed for $path\" } "
-            "} elseif ($path -and $path -notmatch '^\\\\\\\\\\?\\\\Volume') { "
+            "if ($path -match '^\\\\\\\\\\?\\\\Volume') { "
+            "$volumePaths += $path "
+            "} elseif ($path) { "
             f"Remove-PartitionAccessPath -DiskNumber {number} "
             "-PartitionNumber $partition.PartitionNumber "
-            "-AccessPath $path -Confirm:$false } } }"
+            "-AccessPath $path -Confirm:$false } } }; "
+            "$volumePaths | Sort-Object -Unique | ConvertTo-Json -Compress"
         )
         powershell = self._powershell_executable()
         if not powershell:
             self.log("Error: Could not find Windows PowerShell", "ERROR")
-            return False
+            return None
         try:
             result = subprocess.run(
                 [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
@@ -815,16 +821,114 @@ class RADXOIDInstaller:
             )
         except OSError as error:
             self.log(f"Error: Could not start PowerShell: {error}", "ERROR")
-            return False
+            return None
         if result.returncode != 0:
             self.log(
-                f"Error: Could not dismount SD-card volumes: "
+                f"Error: Could not remove SD-card mount points: "
                 f"{result.stderr.strip() or result.stdout.strip()}",
                 "ERROR",
             )
-            return False
-        self.log(f"Unmounted volumes on PhysicalDrive{number}")
-        return True
+            return None
+
+        try:
+            data = json.loads(result.stdout) if result.stdout.strip() else []
+        except json.JSONDecodeError as error:
+            self.log(f"Error: Invalid Windows volume information: {error}", "ERROR")
+            return None
+        if isinstance(data, str):
+            data = [data]
+        volume_paths = []
+        for path in data:
+            if isinstance(path, str) and path.startswith("\\\\?\\Volume{"):
+                volume_paths.append("\\\\.\\" + path[4:].rstrip("\\"))
+
+        if not volume_paths:
+            self.log(f"No mounted filesystem volumes found on PhysicalDrive{number}")
+            return []
+
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        open_existing = 3
+        fsctl_lock_volume = 0x00090018
+        fsctl_dismount_volume = 0x00090020
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.DeviceIoControl.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        ]
+        kernel32.DeviceIoControl.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        locks = []
+        for volume_path in volume_paths:
+            handle = kernel32.CreateFileW(
+                volume_path,
+                generic_read | generic_write,
+                file_share_read | file_share_write,
+                None,
+                open_existing,
+                0,
+                None,
+            )
+            if handle == ctypes.c_void_p(-1).value:
+                error_code = ctypes.get_last_error()
+                detail = ctypes.FormatError(error_code).strip()
+                self._release_windows_volume_locks(locks)
+                self.log(
+                    f"Error: CreateFileW could not open volume {volume_path} "
+                    f"(Windows error {error_code}): {detail}",
+                    "ERROR",
+                )
+                return None
+            locks.append((kernel32, handle, volume_path))
+            returned = wintypes.DWORD()
+            for operation, control_code in (
+                ("FSCTL_LOCK_VOLUME", fsctl_lock_volume),
+                ("FSCTL_DISMOUNT_VOLUME", fsctl_dismount_volume),
+            ):
+                if not kernel32.DeviceIoControl(
+                    handle,
+                    control_code,
+                    None,
+                    0,
+                    None,
+                    0,
+                    ctypes.byref(returned),
+                    None,
+                ):
+                    error_code = ctypes.get_last_error()
+                    detail = ctypes.FormatError(error_code).strip()
+                    self._release_windows_volume_locks(locks)
+                    self.log(
+                        f"Error: {operation} failed for {volume_path} "
+                        f"(Windows error {error_code}): {detail}. "
+                        "Close Explorer and any program using the SD card.",
+                        "ERROR",
+                    )
+                    return None
+        self.log(
+            f"Locked and dismounted {len(locks)} volume(s) on PhysicalDrive{number}"
+        )
+        return locks
 
     def _hash_device_prefix(self, device, size, progress_callback=None):
         """Hash exactly the image-sized prefix of a raw device."""
@@ -1056,28 +1160,30 @@ class RADXOIDInstaller:
             1,
             "Preparing target",
         )
+        windows_volume_locks = []
         if IS_WINDOWS:
-            if not self._dismount_windows(device):
+            windows_volume_locks = self._lock_windows_volumes(device)
+            if windows_volume_locks is None:
                 return False
         elif not self._unmount_partitions(device):
             return False
 
-        refreshed = {item["path"]: item for item in self.list_safe_devices()}
-        selected_after = refreshed.get(device)
-        if (
-            not selected_after
-            or selected_after["size"] != initial_size
-            or selected_after.get("identity", "") != initial_identity
-        ):
-            self.log("Refusing target: device identity or size changed", "ERROR")
-            return False
-
-        self.log(
-            f"Streaming {Path(image_info.filename).name} from "
-            f"{archive_path.name} to {device}"
-        )
-        self.log("WARNING: This erases the entire selected SD card", "WARNING")
         try:
+            refreshed = {item["path"]: item for item in self.list_safe_devices()}
+            selected_after = refreshed.get(device)
+            if (
+                not selected_after
+                or selected_after["size"] != initial_size
+                or selected_after.get("identity", "") != initial_identity
+            ):
+                self.log("Refusing target: device identity or size changed", "ERROR")
+                return False
+
+            self.log(
+                f"Streaming {Path(image_info.filename).name} from "
+                f"{archive_path.name} to {device}"
+            )
+            self.log("WARNING: This erases the entire selected SD card", "WARNING")
             if IS_WINDOWS or os.geteuid() == 0:
                 expected_hash = self._stream_gpt_direct(
                     archive_path, image_info, device, progress_callback
@@ -1117,6 +1223,10 @@ class RADXOIDInstaller:
             self.last_error = f"{type(error).__name__}: {error}"
             self.log(f"Error: {self.last_error}", "ERROR")
             return False
+        finally:
+            if windows_volume_locks:
+                self._release_windows_volume_locks(windows_volume_locks)
+                self.log("Released Windows volume locks")
     
     
     def run(self):
