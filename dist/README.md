@@ -9,7 +9,7 @@ RADXOID-Installer.exe
 RADXOID-Installer.pyw
 RADXOID-Installer-linux-x86_64
 rk356x_rock_3a_r_20261120.1320_gpt.zip
-SHA256SUMS-v1.0.23.txt
+SHA256SUMS-v1.0.24.txt
 ```
 
 `gpt.zip` contains the complete 4.1 GiB `gpt.img` but is approximately

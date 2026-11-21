@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 SOURCE = Path(__file__).parents[1] / "dist" / "installer" / "radxoid_installer.py"
 SPEC = importlib.util.spec_from_file_location("radxoid_installer", SOURCE)
@@ -157,6 +157,7 @@ class InstallerBackendTests(unittest.TestCase):
             ReadFile=Mock(side_effect=read_file),
             WriteFile=Mock(side_effect=write_file),
             FlushFileBuffers=Mock(return_value=True),
+            SetFilePointerEx=Mock(return_value=True),
             CloseHandle=Mock(return_value=True),
         )
         with patch.object(
@@ -168,11 +169,13 @@ class InstallerBackendTests(unittest.TestCase):
             target = self.installer._open_windows_device(
                 r"\\.\PhysicalDrive7",
                 writable=True,
+                exclusive=True,
             )
             write_buffer = bytearray(b"native-write")
             self.assertEqual(target.write(write_buffer), len(write_buffer))
             read_buffer = bytearray(len(payload))
             self.assertEqual(target.readinto(read_buffer), len(payload))
+            self.assertEqual(target.seek(0), 0)
             target.flush()
             target.close()
 
@@ -181,7 +184,7 @@ class InstallerBackendTests(unittest.TestCase):
         create_file.assert_called_once_with(
             r"\\.\PhysicalDrive7",
             0xC0000000,
-            0x00000003,
+            0,
             None,
             3,
             0x80000000,
@@ -189,6 +192,44 @@ class InstallerBackendTests(unittest.TestCase):
         )
         kernel32.FlushFileBuffers.assert_called_once_with(123)
         kernel32.CloseHandle.assert_called_once_with(123)
+
+    def test_windows_write_and_readback_share_one_exclusive_handle(self):
+        target = MagicMock()
+        target.__enter__.return_value = target
+        target.__exit__.return_value = None
+        with (
+            patch.object(
+                self.installer,
+                "_open_windows_device",
+                return_value=target,
+            ) as open_device,
+            patch.object(
+                self.installer,
+                "_stream_gpt_to_target",
+                return_value="source-hash",
+            ) as stream,
+            patch.object(
+                self.installer,
+                "_hash_open_device",
+                return_value="readback-hash",
+            ) as readback,
+        ):
+            result = self.installer._stream_and_verify_windows(
+                self.archive,
+                SimpleNamespace(file_size=len(self.payload)),
+                r"\\.\PhysicalDrive7",
+                None,
+            )
+
+        self.assertEqual(result, ("source-hash", "readback-hash"))
+        open_device.assert_called_once_with(
+            r"\\.\PhysicalDrive7",
+            writable=True,
+            exclusive=True,
+        )
+        self.assertIs(stream.call_args.args[3], target)
+        target.seek.assert_called_once_with(0)
+        self.assertIs(readback.call_args.args[0], target)
 
     def test_windows_createfile_error_includes_device_and_system_error(self):
         kernel32 = SimpleNamespace(
@@ -198,6 +239,7 @@ class InstallerBackendTests(unittest.TestCase):
             ReadFile=Mock(),
             WriteFile=Mock(),
             FlushFileBuffers=Mock(),
+            SetFilePointerEx=Mock(),
             CloseHandle=Mock(return_value=True),
         )
         with (
@@ -311,7 +353,7 @@ class InstallerBackendTests(unittest.TestCase):
             ) as release,
             patch.object(
                 self.installer,
-                "_stream_gpt_direct",
+                "_stream_and_verify_windows",
                 side_effect=PermissionError(13, "Permission denied"),
             ),
         ):

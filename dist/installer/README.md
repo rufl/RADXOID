@@ -11,7 +11,7 @@ Keep these files in one folder:
   3.8+ installed
 - `RADXOID-Installer-linux-x86_64` on Linux
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.23.txt`
+- `SHA256SUMS-v1.0.24.txt`
 
 The GPT ZIP contains one complete `gpt.img`. The installer verifies the ZIP,
 streams `gpt.img` directly to the SD card, and reads the written bytes back for
@@ -68,8 +68,9 @@ executable is quarantined or deleted.
   privileges.
 - The installer locates Windows PowerShell by its system path even when the
   packaged GUI has a minimal `PATH`.
-- Raw physical-disk handles remain entirely in Win32: `CreateFileW`,
-  `WriteFile`, `ReadFile`, `FlushFileBuffers`, and `CloseHandle`.
+- Windows holds one exclusive physical-disk handle continuously through
+  `CreateFileW`, `WriteFile`, `FlushFileBuffers`, `SetFilePointerEx`, and
+  `ReadFile`.
 - Mount points are removed without taking removable media offline. Filesystem
   volumes remain exclusively locked until write and readback complete.
 - If Defender removes the unsigned PyInstaller executable, do not disable
@@ -119,7 +120,7 @@ established.
 
 ### Checksum failure
 
-Download the GPT ZIP and `SHA256SUMS-v1.0.23.txt` again from the same release.
+Download the GPT ZIP and `SHA256SUMS-v1.0.24.txt` again from the same release.
 Do not rename the ZIP.
 
 ### Write failure

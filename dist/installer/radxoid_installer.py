@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.23"
+VERSION = "v1.0.24"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -121,6 +121,19 @@ class _WindowsRawDevice:
             raise ValueError("I/O operation on closed raw device")
         if self._writable and not self._kernel32.FlushFileBuffers(self._handle):
             self._raise_last_error("FlushFileBuffers")
+
+    def seek(self, offset):
+        if self._closed:
+            raise ValueError("I/O operation on closed raw device")
+        position = ctypes.c_longlong()
+        if not self._kernel32.SetFilePointerEx(
+            self._handle,
+            ctypes.c_longlong(offset),
+            ctypes.byref(position),
+            0,
+        ):
+            self._raise_last_error("SetFilePointerEx")
+        return position.value
 
     def close(self):
         if not self._closed:
@@ -749,7 +762,7 @@ class RADXOIDInstaller:
         match = re.fullmatch(r"\\\\\.\\PhysicalDrive(\d+)", device or "")
         return int(match.group(1)) if match else None
 
-    def _open_windows_device(self, device, writable):
+    def _open_windows_device(self, device, writable, exclusive=False):
         """Open a physical disk without passing its handle through the CRT."""
         if self._windows_disk_number(device) is None:
             raise ValueError(f"Invalid Windows physical-disk path: {device}")
@@ -791,15 +804,23 @@ class RADXOIDInstaller:
         kernel32.WriteFile.restype = wintypes.BOOL
         kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
         kernel32.FlushFileBuffers.restype = wintypes.BOOL
+        kernel32.SetFilePointerEx.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_longlong,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.SetFilePointerEx.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
 
         access = generic_read | (generic_write if writable else 0)
         attributes = file_flag_write_through if writable else file_attribute_normal
+        share_mode = 0 if exclusive else file_share_read | file_share_write
         handle = kernel32.CreateFileW(
             device,
             access,
-            file_share_read | file_share_write,
+            share_mode,
             None,
             open_existing,
             attributes,
@@ -965,8 +986,7 @@ class RADXOIDInstaller:
         )
         return locks
 
-    def _hash_device_prefix(self, device, size, progress_callback=None):
-        """Hash exactly the image-sized prefix of a raw device."""
+    def _hash_open_device(self, source, size, progress_callback=None):
         block_size = 4 * 1024 * 1024
         digest = hashlib.sha256()
         remaining = size
@@ -975,89 +995,96 @@ class RADXOIDInstaller:
         self._emit_flash_progress(
             progress_callback, phase, 0, size, start=50.0, span=50.0
         )
-
-        if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
-            buffer = bytearray(block_size)
-            buffer_view = memoryview(buffer)
-            with self._open_device(device) as source:
-                while remaining:
-                    requested = min(block_size, remaining)
-                    read = source.readinto(buffer_view[:requested])
-                    if not read:
-                        break
-                    digest.update(buffer_view[:read])
-                    processed += read
-                    remaining -= read
-                    self._emit_flash_progress(
-                        progress_callback,
-                        phase,
-                        processed,
-                        size,
-                        start=50.0,
-                        span=50.0,
-                    )
-        else:
-            command = self._privileged_command([
-                "dd", f"if={device}", "bs=4M", f"count={size}",
-                "iflag=count_bytes", "status=none",
-            ])
-            process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        buffer = bytearray(block_size)
+        buffer_view = memoryview(buffer)
+        while remaining:
+            requested = min(block_size, remaining)
+            read = source.readinto(buffer_view[:requested])
+            if not read:
+                break
+            digest.update(buffer_view[:read])
+            processed += read
+            remaining -= read
+            self._emit_flash_progress(
+                progress_callback,
+                phase,
+                processed,
+                size,
+                start=50.0,
+                span=50.0,
             )
-            try:
-                while remaining:
-                    chunk = process.stdout.read(min(block_size, remaining))
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    processed += len(chunk)
-                    remaining -= len(chunk)
-                    self._emit_flash_progress(
-                        progress_callback,
-                        phase,
-                        processed,
-                        size,
-                        start=50.0,
-                        span=50.0,
-                    )
-                stderr = process.stderr.read()
-                process.wait()
-            except Exception:
-                process.kill()
-                process.wait()
-                raise
-            if process.returncode != 0:
-                self.log(
-                    f"Error: Could not verify written data: "
-                    f"{stderr.decode(errors='replace').strip()}",
-                    "ERROR",
-                )
-                return None
-
         if remaining:
             self.log("Error: SD-card readback ended before image size", "ERROR")
             return None
         return digest.hexdigest()
 
-    def _stream_gpt_direct(
-        self, archive_path, image_info, device, progress_callback
+    def _hash_device_prefix(self, device, size, progress_callback=None):
+        """Hash exactly the image-sized prefix of a raw device."""
+        if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
+            with self._open_device(device) as source:
+                return self._hash_open_device(source, size, progress_callback)
+
+        command = self._privileged_command([
+            "dd", f"if={device}", "bs=4M", f"count={size}",
+            "iflag=count_bytes", "status=none",
+        ])
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        digest = hashlib.sha256()
+        remaining = size
+        processed = 0
+        phase = "Verifying SD-card readback"
+        self._emit_flash_progress(
+            progress_callback, phase, 0, size, start=50.0, span=50.0
+        )
+        try:
+            while remaining:
+                chunk = process.stdout.read(min(4 * 1024 * 1024, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                processed += len(chunk)
+                remaining -= len(chunk)
+                self._emit_flash_progress(
+                    progress_callback,
+                    phase,
+                    processed,
+                    size,
+                    start=50.0,
+                    span=50.0,
+                )
+            stderr = process.stderr.read()
+            process.wait()
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        if process.returncode != 0:
+            self.log(
+                f"Error: Could not verify written data: "
+                f"{stderr.decode(errors='replace').strip()}",
+                "ERROR",
+            )
+            return None
+        if remaining:
+            self.log("Error: SD-card readback ended before image size", "ERROR")
+            return None
+        return digest.hexdigest()
+
+    def _stream_gpt_to_target(
+        self, archive_path, image_info, device, target, progress_callback
     ):
-        """Decompress gpt.img directly to an already-authorized raw device."""
         digest = hashlib.sha256()
         processed = 0
         size = image_info.file_size
         self._emit_flash_progress(
             progress_callback, "Writing gpt.img", 0, size, start=0.0, span=50.0
         )
-        if IS_WINDOWS:
-            self.log(f"Opening {device} with native CreateFileW raw-disk access")
         with (
             zipfile.ZipFile(archive_path) as archive,
             archive.open(image_info) as source,
-            self._open_device(device, writable=True) as target,
         ):
-            if IS_WINDOWS:
-                self.log("Raw disk handle opened; writing with Win32 WriteFile")
             buffer = bytearray(4 * 1024 * 1024)
             buffer_view = memoryview(buffer)
             while read := source.readinto(buffer_view):
@@ -1084,6 +1111,42 @@ class RADXOIDInstaller:
                 f"GPT image size mismatch: expected {size}, streamed {processed}"
             )
         return digest.hexdigest()
+
+    def _stream_gpt_direct(
+        self, archive_path, image_info, device, progress_callback
+    ):
+        """Decompress gpt.img directly to an already-authorized raw device."""
+        with self._open_device(device, writable=True) as target:
+            return self._stream_gpt_to_target(
+                archive_path, image_info, device, target, progress_callback
+            )
+
+    def _stream_and_verify_windows(
+        self, archive_path, image_info, device, progress_callback
+    ):
+        """Keep one exclusive physical-disk handle through write and readback."""
+        self.log(f"Opening {device} with exclusive Win32 raw-disk access")
+        with self._open_windows_device(
+            device,
+            writable=True,
+            exclusive=True,
+        ) as target:
+            self.log("Exclusive raw-disk handle opened; writing with Win32 WriteFile")
+            expected_hash = self._stream_gpt_to_target(
+                archive_path,
+                image_info,
+                device,
+                target,
+                progress_callback,
+            )
+            self.log("Write and ZIP CRC validation complete; verifying readback")
+            target.seek(0)
+            actual_hash = self._hash_open_device(
+                target,
+                image_info.file_size,
+                progress_callback,
+            )
+        return expected_hash, actual_hash
 
     def _stream_gpt_with_dd(
         self, archive_path, image_info, device, progress_callback
@@ -1219,20 +1282,25 @@ class RADXOIDInstaller:
                 f"{archive_path.name} to {device}"
             )
             self.log("WARNING: This erases the entire selected SD card", "WARNING")
-            if IS_WINDOWS or os.geteuid() == 0:
-                expected_hash = self._stream_gpt_direct(
+            if IS_WINDOWS:
+                expected_hash, actual_hash = self._stream_and_verify_windows(
                     archive_path, image_info, device, progress_callback
                 )
             else:
-                expected_hash = self._stream_gpt_with_dd(
-                    archive_path, image_info, device, progress_callback
+                if os.geteuid() == 0:
+                    expected_hash = self._stream_gpt_direct(
+                        archive_path, image_info, device, progress_callback
+                    )
+                else:
+                    expected_hash = self._stream_gpt_with_dd(
+                        archive_path, image_info, device, progress_callback
+                    )
+                self.log("Write and ZIP CRC validation complete; verifying readback")
+                if IS_LINUX:
+                    subprocess.run(["sync"], check=False)
+                actual_hash = self._hash_device_prefix(
+                    device, image_size, progress_callback
                 )
-            self.log("Write and ZIP CRC validation complete; verifying readback")
-            if IS_LINUX:
-                subprocess.run(["sync"], check=False)
-            actual_hash = self._hash_device_prefix(
-                device, image_size, progress_callback
-            )
             if actual_hash != expected_hash:
                 self.last_error = (
                     "Post-write SHA-256 mismatch: the SD card did not read back "

@@ -1,5 +1,15 @@
 # RADXOID Changelog
 
+## [v1.0.24] - Exclusive write/readback handle
+
+### Fixed
+- Windows now keeps one exclusive `PhysicalDrive` handle open continuously
+  through raw writing, flush, rewind, and complete SHA-256 readback.
+- Removes the close/reopen gap that allowed Windows or another process to
+  access the card between writing and verification.
+- Uses `SetFilePointerEx` to rewind the same Win32 handle before readback.
+
+
 ## [v1.0.23] - Persistent crash-safe log
 
 ### Added
