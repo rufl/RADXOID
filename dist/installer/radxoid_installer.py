@@ -26,7 +26,7 @@ else:
     APP_DIR = Path(__file__).parent
 
 # Configuration
-VERSION = "v1.0.10"
+VERSION = "v1.0.11"
 REPO_URL = "https://github.com/rufl/RADXOID"
 RELEASE_URL = f"{REPO_URL}/releases/tag/{VERSION}"
 
@@ -297,7 +297,10 @@ class RADXOIDInstaller:
                     if total_bytes else 100.0
                 )
 
-        self.log(f"Joining {len(groups)} split file(s)")
+        if groups:
+            self.log(f"Joining {len(groups)} split file(s)")
+        else:
+            self.log("No split volumes found; copying complete release assets")
         for base, vols in groups.items():
             self.join_volumes(vols, self.output_dir / base, advance)
         
@@ -318,6 +321,10 @@ class RADXOIDInstaller:
                         out_file.write(chunk)
                         advance(len(chunk))
                 os.replace(temporary, destination)
+                if destination.stat().st_size != complete_file.stat().st_size:
+                    raise IOError(
+                        f"Output size mismatch for {destination.name}"
+                    )
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
@@ -325,6 +332,7 @@ class RADXOIDInstaller:
         
         if progress_callback:
             progress_callback(100.0)
+        self.log(f"Assets ready in output directory: {self.output_dir}")
         return True
     
     def verify_checksums(self, progress_callback=None, cancel_event=None):
@@ -656,15 +664,18 @@ class RADXOIDGUI:
         # Highlight current step
         self.update_step_indicator()
         
-        # Main content frame
+        # Dynamic step content; log_text lives outside this frame so
+        # changing steps does not destroy the operation log.
         self.content_frame = ttk.Frame(main_frame)
-        self.content_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        
-        # Log text
+        self.content_frame.pack(fill=tk.X, pady=10)
+
+        self.log_frame = ttk.LabelFrame(main_frame, text="Operation log")
+        self.log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
         self.log_text = scrolledtext.ScrolledText(
-            self.content_frame,
+            self.log_frame,
             wrap=tk.WORD,
-            height=15,
+            height=10,
             state='disabled'
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
