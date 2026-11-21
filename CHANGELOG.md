@@ -1,5 +1,23 @@
 # RADXOID Changelog
 
+## [v1.0.18] - Native Windows raw-disk access
+
+### Fixed
+- Opens `\\.\PhysicalDriveN` through `CreateFileW` with the Windows DASD
+  requirements: Administrator access, `OPEN_EXISTING`, read/write sharing, and
+  write-through output.
+- Flushes Windows raw-device writes with `FlushFileBuffers` before readback.
+
+### Diagnostics
+- Shows the exact exception, device path, native API operation, and Windows
+  system error when opening or flushing the selected SD card fails.
+
+### Verification
+- Tests the `CreateFileW` access/share/disposition contract and error
+  propagation.
+- Runs the installer backend tests on both Windows and Linux before packaging.
+
+
 ## [v1.0.17] - Broader Windows removable-media detection
 
 ### Fixed

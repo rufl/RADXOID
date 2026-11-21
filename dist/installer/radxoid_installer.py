@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.17"
+VERSION = "v1.0.18"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -46,6 +46,7 @@ class RADXOIDInstaller:
         self.log_queue = queue.Queue()
         self.log_lock = threading.Lock()
         self.log_path = self._create_session_log()
+        self.last_error = None
 
     @staticmethod
     def _create_session_log():
@@ -633,6 +634,101 @@ class RADXOIDInstaller:
         match = re.fullmatch(r"\\\\\.\\PhysicalDrive(\d+)", device or "")
         return int(match.group(1)) if match else None
 
+    def _open_windows_device(self, device, writable):
+        """Open a physical disk with the native Windows raw-device contract."""
+        if self._windows_disk_number(device) is None:
+            raise ValueError(f"Invalid Windows physical-disk path: {device}")
+
+        import msvcrt
+        from ctypes import wintypes
+
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        open_existing = 3
+        file_attribute_normal = 0x00000080
+        file_flag_write_through = 0x80000000
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        access = generic_read | (generic_write if writable else 0)
+        attributes = file_flag_write_through if writable else file_attribute_normal
+        handle = create_file(
+            device,
+            access,
+            file_share_read | file_share_write,
+            None,
+            open_existing,
+            attributes,
+            None,
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            error_code = ctypes.get_last_error()
+            action = "write" if writable else "read"
+            detail = ctypes.FormatError(error_code).strip()
+            raise OSError(
+                error_code,
+                f"CreateFileW could not open {device} for raw {action}: {detail}",
+            )
+
+        flags = os.O_RDWR if writable else os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        try:
+            descriptor = msvcrt.open_osfhandle(handle, flags)
+        except Exception:
+            kernel32.CloseHandle(handle)
+            raise
+        try:
+            return os.fdopen(
+                descriptor,
+                "r+b" if writable else "rb",
+                buffering=0,
+            )
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def _open_device(self, device, writable=False):
+        if IS_WINDOWS:
+            return self._open_windows_device(device, writable)
+        return open(device, "r+b" if writable else "rb", buffering=0)
+
+    @staticmethod
+    def _flush_device(target):
+        target.flush()
+        if not IS_WINDOWS:
+            os.fsync(target.fileno())
+            return
+
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+        kernel32.FlushFileBuffers.restype = wintypes.BOOL
+        handle = msvcrt.get_osfhandle(target.fileno())
+        if not kernel32.FlushFileBuffers(handle):
+            error_code = ctypes.get_last_error()
+            detail = ctypes.FormatError(error_code).strip()
+            raise OSError(
+                error_code,
+                f"FlushFileBuffers failed for the SD card: {detail}",
+            )
+
     def _dismount_windows(self, device):
         number = self._windows_disk_number(device)
         if number is None:
@@ -685,7 +781,7 @@ class RADXOIDInstaller:
         )
 
         if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
-            with open(device, "rb", buffering=0) as source:
+            with self._open_device(device) as source:
                 while remaining:
                     chunk = source.read(min(block_size, remaining))
                     if not chunk:
@@ -754,10 +850,12 @@ class RADXOIDInstaller:
         self._emit_flash_progress(
             progress_callback, "Writing gpt.img", 0, size, start=0.0, span=50.0
         )
+        if IS_WINDOWS:
+            self.log(f"Opening {device} with native CreateFileW raw-disk access")
         with (
             zipfile.ZipFile(archive_path) as archive,
             archive.open(image_info) as source,
-            open(device, "r+b", buffering=0) as target,
+            self._open_device(device, writable=True) as target,
         ):
             while chunk := source.read(4 * 1024 * 1024):
                 digest.update(chunk)
@@ -776,8 +874,7 @@ class RADXOIDInstaller:
                     start=0.0,
                     span=50.0,
                 )
-            target.flush()
-            os.fsync(target.fileno())
+            self._flush_device(target)
         if processed != size:
             raise OSError(
                 f"GPT image size mismatch: expected {size}, streamed {processed}"
@@ -838,6 +935,7 @@ class RADXOIDInstaller:
 
     def flash_to_sd_card(self, device, progress_callback=None):
         """Stream the release GPT image to a revalidated SD card and verify it."""
+        self.last_error = None
         if not device:
             self.log("Error: No SD card device selected", "ERROR")
             return False
@@ -930,8 +1028,12 @@ class RADXOIDInstaller:
                 device, image_size, progress_callback
             )
             if actual_hash != expected_hash:
+                self.last_error = (
+                    "Post-write SHA-256 mismatch: the SD card did not read back "
+                    "the same data that was written"
+                )
                 self.log(
-                    f"Error: Post-write SHA-256 mismatch "
+                    f"Error: {self.last_error} "
                     f"(source {expected_hash}, readback {actual_hash})",
                     "ERROR",
                 )
@@ -947,7 +1049,8 @@ class RADXOIDInstaller:
             self.log("SD-card write and readback verification completed successfully!")
             return True
         except (OSError, RuntimeError, zipfile.BadZipFile) as error:
-            self.log(f"Error: {error}", "ERROR")
+            self.last_error = f"{type(error).__name__}: {error}"
+            self.log(f"Error: {self.last_error}", "ERROR")
             return False
     
     
@@ -1507,7 +1610,10 @@ class RADXOIDGUI:
                 progress_callback=self._report_flash_progress,
             )
             if not result:
-                error = "The write or readback verification failed."
+                error = (
+                    self.installer.last_error
+                    or "The write or readback verification failed. See the operation log."
+                )
         except Exception as exception:  # noqa: BLE001 - worker boundary
             error = str(exception)
             self.installer.log(f"SD-card write failed: {exception}", "ERROR")

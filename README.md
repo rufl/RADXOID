@@ -115,7 +115,7 @@ Required files:
 
 - `RADXOID-Installer.exe` or `RADXOID-Installer-linux-x86_64`
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.17.txt`
+- `SHA256SUMS-v1.0.18.txt`
 
 The GUI verifies the ZIP, streams `gpt.img` to a removable whole-disk target,
 then reads the written image back and compares SHA-256. Progress and every

@@ -3,10 +3,12 @@ import importlib.util
 import os
 import tempfile
 import unittest
+import sys
 import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 SOURCE = Path(__file__).parents[1] / "dist" / "installer" / "radxoid_installer.py"
 SPEC = importlib.util.spec_from_file_location("radxoid_installer", SOURCE)
@@ -60,6 +62,8 @@ class InstallerBackendTests(unittest.TestCase):
         }
         progress = []
         with (
+            patch.object(installer_module, "IS_WINDOWS", False),
+            patch.object(installer_module, "IS_LINUX", True),
             patch.object(
                 self.installer,
                 "list_safe_devices",
@@ -90,6 +94,124 @@ class InstallerBackendTests(unittest.TestCase):
             any(phase == "Verifying SD-card readback" for phase, _, _ in progress)
         )
 
+    def test_windows_raw_device_uses_createfile_contract(self):
+        create_file = Mock(return_value=123)
+        kernel32 = SimpleNamespace(
+            CreateFileW=create_file,
+            CloseHandle=Mock(return_value=True),
+        )
+        msvcrt = SimpleNamespace(open_osfhandle=Mock(return_value=77))
+        file_object = object()
+        with (
+            patch.dict(sys.modules, {"msvcrt": msvcrt}),
+            patch.object(
+                installer_module.ctypes,
+                "WinDLL",
+                create=True,
+                return_value=kernel32,
+            ),
+            patch.object(
+                installer_module.os,
+                "fdopen",
+                return_value=file_object,
+            ) as fdopen,
+        ):
+            result = self.installer._open_windows_device(
+                r"\\.\PhysicalDrive7",
+                writable=True,
+            )
+
+        self.assertIs(result, file_object)
+        create_file.assert_called_once_with(
+            r"\\.\PhysicalDrive7",
+            0xC0000000,
+            0x00000003,
+            None,
+            3,
+            0x80000000,
+            None,
+        )
+        flags = installer_module.os.O_RDWR | getattr(
+            installer_module.os,
+            "O_BINARY",
+            0,
+        )
+        msvcrt.open_osfhandle.assert_called_once_with(123, flags)
+        fdopen.assert_called_once_with(77, "r+b", buffering=0)
+
+    def test_windows_createfile_error_includes_device_and_system_error(self):
+        kernel32 = SimpleNamespace(
+            CreateFileW=Mock(return_value=(1 << 64) - 1),
+            CloseHandle=Mock(return_value=True),
+        )
+        with (
+            patch.dict(
+                sys.modules,
+                {"msvcrt": SimpleNamespace(open_osfhandle=Mock())},
+            ),
+            patch.object(
+                installer_module.ctypes,
+                "WinDLL",
+                create=True,
+                return_value=kernel32,
+            ),
+            patch.object(
+                installer_module.ctypes,
+                "get_last_error",
+                create=True,
+                return_value=5,
+            ),
+            patch.object(
+                installer_module.ctypes,
+                "FormatError",
+                create=True,
+                return_value="Access is denied.\r\n",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                r"CreateFileW could not open \\\\\.\\PhysicalDrive7 "
+                r"for raw write: Access is denied\.",
+            ):
+                self.installer._open_windows_device(
+                    r"\\.\PhysicalDrive7",
+                    writable=True,
+                )
+
+    def test_raw_write_error_is_preserved_for_the_gui(self):
+        self.assertTrue(self.installer.verify_checksums())
+        target = self.root / "permission-denied-card.bin"
+        target.write_bytes(b"\0" * (len(self.payload) + 1024))
+        device = {
+            "path": str(target),
+            "label": "test removable SD",
+            "size": target.stat().st_size,
+            "identity": "permission-card",
+        }
+        with (
+            patch.object(installer_module, "IS_WINDOWS", False),
+            patch.object(installer_module, "IS_LINUX", True),
+            patch.object(
+                self.installer,
+                "list_safe_devices",
+                side_effect=[[device], [device]],
+            ),
+            patch.object(self.installer, "_unmount_partitions", return_value=True),
+            patch.object(installer_module.os, "geteuid", return_value=0),
+            patch.object(
+                self.installer,
+                "_stream_gpt_direct",
+                side_effect=PermissionError(13, "Permission denied"),
+            ),
+        ):
+            result = self.installer.flash_to_sd_card(str(target))
+
+        self.assertFalse(result)
+        self.assertEqual(
+            self.installer.last_error,
+            "PermissionError: [Errno 13] Permission denied",
+        )
+
     def test_refuses_target_smaller_than_uncompressed_image(self):
         self.assertTrue(self.installer.verify_checksums())
         target = self.root / "small-card.bin"
@@ -116,6 +238,8 @@ class InstallerBackendTests(unittest.TestCase):
         }
         second = dict(first, identity="card-b")
         with (
+            patch.object(installer_module, "IS_WINDOWS", False),
+            patch.object(installer_module, "IS_LINUX", True),
             patch.object(
                 self.installer,
                 "list_safe_devices",
