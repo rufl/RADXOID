@@ -70,7 +70,12 @@ class InstallerBackendTests(unittest.TestCase):
                 side_effect=[[device], [device]],
             ),
             patch.object(self.installer, "_unmount_partitions", return_value=True),
-            patch.object(installer_module.os, "geteuid", return_value=0),
+            patch.object(
+                installer_module.os,
+                "geteuid",
+                return_value=0,
+                create=True,
+            ),
             patch.object(
                 installer_module.subprocess,
                 "run",
@@ -197,7 +202,12 @@ class InstallerBackendTests(unittest.TestCase):
                 side_effect=[[device], [device]],
             ),
             patch.object(self.installer, "_unmount_partitions", return_value=True),
-            patch.object(installer_module.os, "geteuid", return_value=0),
+            patch.object(
+                installer_module.os,
+                "geteuid",
+                return_value=0,
+                create=True,
+            ),
             patch.object(
                 self.installer,
                 "_stream_gpt_direct",
