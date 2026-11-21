@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.14"
+VERSION = "v1.0.15"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -147,6 +147,28 @@ class RADXOIDInstaller:
             if separator:
                 properties[key] = value
         return properties
+    @staticmethod
+    def _powershell_executable():
+        """Find Windows PowerShell even when a GUI process has a minimal PATH."""
+        system_root = os.environ.get("SystemRoot")
+        if system_root:
+            root = Path(system_root)
+            for system_dir in ("System32", "Sysnative"):
+                candidate = (
+                    root
+                    / system_dir
+                    / "WindowsPowerShell"
+                    / "v1.0"
+                    / "powershell.exe"
+                )
+                if candidate.is_file():
+                    return str(candidate)
+        for executable in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
+            candidate = shutil.which(executable)
+            if candidate:
+                return candidate
+        return None
+
 
     def list_safe_devices(self):
         """Return removable SD-card whole disks that are writable and safe."""
@@ -168,9 +190,13 @@ class RADXOIDInstaller:
                 "SerialNumber=[string]$drive.SerialNumber} } }; "
                 "$items | ConvertTo-Json -Compress"
             )
+            powershell = self._powershell_executable()
+            if not powershell:
+                self.log("Could not find Windows PowerShell", "ERROR")
+                return []
             try:
                 result = subprocess.run(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                    [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
                     capture_output=True, text=True, check=False,
                 )
             except OSError as error:
@@ -572,9 +598,13 @@ class RADXOIDInstaller:
             "-PartitionNumber $partition.PartitionNumber "
             "-AccessPath $path -Confirm:$false } } }"
         )
+        powershell = self._powershell_executable()
+        if not powershell:
+            self.log("Error: Could not find Windows PowerShell", "ERROR")
+            return False
         try:
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
                 capture_output=True, text=True, check=False,
             )
         except OSError as error:

@@ -1,5 +1,16 @@
 # RADXOID Changelog
 
+## [v1.0.15] - Windows PowerShell discovery fix
+
+### Fixed
+- Locates Windows PowerShell through `%SystemRoot%\System32` or `Sysnative`
+  before consulting `PATH`.
+- Prevents packaged Administrator GUI processes from reporting
+  `[WinError 2]` while enumerating or dismounting SD-card volumes.
+
+### Verified
+- Added a regression test with an empty `PATH` and a valid system PowerShell.
+
 ## [v1.0.14] - Verified SD-card writer
 
 ### Fixed

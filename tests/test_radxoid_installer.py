@@ -140,6 +140,39 @@ class InstallerBackendTests(unittest.TestCase):
             self.installer.log_path.read_text(encoding="utf-8"),
         )
 
+    def test_windows_powershell_is_found_without_path_entry(self):
+        windows_root = self.root / "Windows"
+        powershell = (
+            windows_root
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        )
+        powershell.parent.mkdir(parents=True)
+        powershell.write_bytes(b"test executable")
+        disk_json = (
+            '[{"Number":4,"Size":68719476736,"Model":"SD Reader",'
+            '"BusType":"USB","UniqueId":"disk-id","SerialNumber":"card-id"}]'
+        )
+        completed = CompletedProcess([], 0, disk_json, "")
+        with (
+            patch.object(installer_module, "IS_WINDOWS", True),
+            patch.dict(
+                installer_module.os.environ,
+                {"SystemRoot": str(windows_root), "PATH": ""},
+            ),
+            patch.object(installer_module.shutil, "which", return_value=None),
+            patch.object(
+                installer_module.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            devices = self.installer.list_safe_devices()
+        self.assertEqual(devices[0]["path"], r"\\.\PhysicalDrive4")
+        self.assertEqual(run.call_args.args[0][0], str(powershell))
+
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "Tk requires a display")
 class InstallerGUITests(unittest.TestCase):

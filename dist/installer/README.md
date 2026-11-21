@@ -9,7 +9,7 @@ Keep these files in one folder:
 
 - `RADXOID-Installer.exe` or `RADXOID-Installer-linux-x86_64`
 - `rk356x_rock_3a_r_20261120.1320_gpt.zip`
-- `SHA256SUMS-v1.0.14.txt`
+- `SHA256SUMS-v1.0.15.txt`
 
 The GPT ZIP contains one complete `gpt.img`. The installer verifies the ZIP,
 streams `gpt.img` directly to the SD card, and reads the written bytes back for
@@ -55,7 +55,8 @@ operation log. Every run also writes a durable log:
 
 - Windows 10 or newer.
 - Run the packaged executable. Its manifest requests Administrator privileges.
-- PowerShell storage cmdlets must be available.
+- The installer locates Windows PowerShell by its system path even when the
+  packaged GUI has a minimal `PATH`.
 
 ### Linux
 
@@ -100,7 +101,7 @@ established.
 
 ### Checksum failure
 
-Download the GPT ZIP and `SHA256SUMS-v1.0.14.txt` again from the same release.
+Download the GPT ZIP and `SHA256SUMS-v1.0.15.txt` again from the same release.
 Do not rename the ZIP.
 
 ### Write failure
