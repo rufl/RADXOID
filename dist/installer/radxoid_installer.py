@@ -775,7 +775,7 @@ class RADXOIDGUI:
                 wraplength=650,
             ).pack(pady=5)
             
-            if not hasattr(self, 'checksum_result'):
+            if not self.checksum_started:
                 self.checksum_result = None
                 self.checksum_started = True
                 threading.Thread(target=self.run_checksums, daemon=True).start()
@@ -828,7 +828,7 @@ class RADXOIDGUI:
                 wraplength=650,
             ).pack(pady=5)
             
-            if not hasattr(self, 'join_result'):
+            if not self.join_started:
                 self.join_result = None
                 self.join_started = True
                 threading.Thread(target=self.run_join, daemon=True).start()
