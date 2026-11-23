@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Configuration
-VERSION = "v1.0.24"
+VERSION = "v1.0.25"
 
 # Platform detection
 PLATFORM = sys.platform
@@ -986,9 +986,12 @@ class RADXOIDInstaller:
         )
         return locks
 
-    def _hash_open_device(self, source, size, progress_callback=None):
+    def _hash_open_device(
+        self, source, size, progress_callback=None, reference=None
+    ):
         block_size = 4 * 1024 * 1024
         digest = hashlib.sha256()
+        reference_offset = 0
         remaining = size
         processed = 0
         phase = "Verifying SD-card readback"
@@ -1002,7 +1005,19 @@ class RADXOIDInstaller:
             read = source.readinto(buffer_view[:requested])
             if not read:
                 break
-            digest.update(buffer_view[:read])
+            chunk = buffer_view[:read]
+            digest.update(chunk)
+            if reference is not None:
+                expected = reference[reference_offset:reference_offset + read]
+                if bytes(chunk) != bytes(expected):
+                    mismatch = next(
+                        index
+                        for index, pair in enumerate(zip(chunk, expected))
+                        if pair[0] != pair[1]
+                    )
+                    absolute = reference_offset + mismatch
+                    return digest.hexdigest(), absolute
+            reference_offset += read
             processed += read
             remaining -= read
             self._emit_flash_progress(
@@ -1015,7 +1030,9 @@ class RADXOIDInstaller:
             )
         if remaining:
             self.log("Error: SD-card readback ended before image size", "ERROR")
-            return None
+            return None, None
+        if reference is not None:
+            return digest.hexdigest(), None
         return digest.hexdigest()
 
     def _hash_device_prefix(self, device, size, progress_callback=None):
@@ -1147,6 +1164,79 @@ class RADXOIDInstaller:
                 progress_callback,
             )
         return expected_hash, actual_hash
+
+    def _retry_windows_write_and_verify(
+        self, archive_path, image_info, device, progress_callback
+    ):
+        for attempt in (1, 2):
+            expected_hash, actual_hash = self._stream_and_verify_windows(
+                archive_path, image_info, device, progress_callback
+            )
+            if actual_hash == expected_hash:
+                return expected_hash, actual_hash, None
+            self.log(
+                "SHA-256 mismatch after write; retrying the complete write from byte zero",
+                "WARNING",
+            )
+        return expected_hash, actual_hash, (
+            "Post-write SHA-256 mismatch: the SD card did not read back "
+            "the same data that was written"
+        )
+
+    def _hash_device_prefix(self, device, size, progress_callback=None):
+        """Hash exactly the image-sized prefix of a raw device."""
+        if IS_WINDOWS or (IS_LINUX and os.geteuid() == 0):
+            with self._open_device(device) as source:
+                result = self._hash_open_device(source, size, progress_callback)
+                return result[0] if isinstance(result, tuple) else result
+
+        command = self._privileged_command([
+            "dd", f"if={device}", "bs=4M", f"count={size}",
+            "iflag=count_bytes", "status=none",
+        ])
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        digest = hashlib.sha256()
+        remaining = size
+        processed = 0
+        phase = "Verifying SD-card readback"
+        self._emit_flash_progress(
+            progress_callback, phase, 0, size, start=50.0, span=50.0
+        )
+        try:
+            while remaining:
+                chunk = process.stdout.read(min(4 * 1024 * 1024, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                processed += len(chunk)
+                remaining -= len(chunk)
+                self._emit_flash_progress(
+                    progress_callback,
+                    phase,
+                    processed,
+                    size,
+                    start=50.0,
+                    span=50.0,
+                )
+            stderr = process.stderr.read()
+            process.wait()
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        if process.returncode != 0:
+            self.log(
+                f"Error: Could not verify written data: "
+                f"{stderr.decode(errors='replace').strip()}",
+                "ERROR",
+            )
+            return None
+        if remaining:
+            self.log("Error: SD-card readback ended before image size", "ERROR")
+            return None
+        return digest.hexdigest()
 
     def _stream_gpt_with_dd(
         self, archive_path, image_info, device, progress_callback
@@ -1283,8 +1373,13 @@ class RADXOIDInstaller:
             )
             self.log("WARNING: This erases the entire selected SD card", "WARNING")
             if IS_WINDOWS:
-                expected_hash, actual_hash = self._stream_and_verify_windows(
-                    archive_path, image_info, device, progress_callback
+                expected_hash, actual_hash, verify_error = (
+                    self._retry_windows_write_and_verify(
+                        archive_path,
+                        image_info,
+                        device,
+                        progress_callback,
+                    )
                 )
             else:
                 if os.geteuid() == 0:
@@ -1301,14 +1396,36 @@ class RADXOIDInstaller:
                 actual_hash = self._hash_device_prefix(
                     device, image_size, progress_callback
                 )
-            if actual_hash != expected_hash:
+                verify_error = None
+            if verify_error is not None or actual_hash != expected_hash:
                 self.last_error = (
                     "Post-write SHA-256 mismatch: the SD card did not read back "
                     "the same data that was written"
                 )
+                detail = f"(source {expected_hash}, readback {actual_hash})"
+                if IS_WINDOWS and actual_hash is not None:
+                    with zipfile.ZipFile(archive_path) as archive:
+                        image_bytes = archive.read(image_info)
+                    with self._open_windows_device(
+                        device,
+                        writable=False,
+                    ) as source:
+                        source.seek(0)
+                        _, mismatch_offset = self._hash_open_device(
+                            source,
+                            image_size,
+                            progress_callback,
+                            reference=image_bytes,
+                        )
+                    if mismatch_offset is not None:
+                        detail += (
+                            f"; first mismatch at byte {mismatch_offset} "
+                            f"(0x{mismatch_offset:x})"
+                        )
+                self.log(f"Error: {self.last_error} {detail}", "ERROR")
                 self.log(
-                    f"Error: {self.last_error} "
-                    f"(source {expected_hash}, readback {actual_hash})",
+                    "Try another SD card or reader. If the mismatch persists, "
+                    "recover the board over USB with the Rockchip update package.",
                     "ERROR",
                 )
                 return False

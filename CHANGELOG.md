@@ -1,5 +1,17 @@
 # RADXOID Changelog
 
+## [v1.0.25] - Deterministic mismatch diagnostics
+
+### Added
+- Windows write attempts now retry the complete operation once after a SHA-256
+  readback mismatch.
+- When verification still fails, the installer reports the first differing
+  byte offset in decimal and hexadecimal.
+
+### Fixed
+- Linux readback compatibility with the new reference-based verification path.
+
+
 ## [v1.0.24] - Exclusive write/readback handle
 
 ### Fixed

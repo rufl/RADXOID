@@ -231,6 +231,48 @@ class InstallerBackendTests(unittest.TestCase):
         target.seek.assert_called_once_with(0)
         self.assertIs(readback.call_args.args[0], target)
 
+    def test_windows_retry_succeeds_on_second_full_write(self):
+        with patch.object(
+            self.installer,
+            "_stream_and_verify_windows",
+            side_effect=[("expected", "actual"), ("expected", "expected")],
+        ) as stream:
+            result = self.installer._retry_windows_write_and_verify(
+                self.archive,
+                SimpleNamespace(file_size=len(self.payload)),
+                r"\\.\PhysicalDrive7",
+                None,
+            )
+
+        self.assertEqual(result, ("expected", "expected", None))
+        self.assertEqual(stream.call_count, 2)
+
+    def test_hash_open_device_reports_first_mismatch_offset(self):
+        class FakeSource:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def readinto(self, buffer):
+                if not self._chunks:
+                    return 0
+                chunk = self._chunks.pop(0)
+                buffer[:len(chunk)] = chunk
+                return len(chunk)
+
+        reference = b"abcd" + (b"X" * (5 * 1024 * 1024 - 4))
+        source = FakeSource([
+            b"abcd" + b"\0" * ((4 * 1024 * 1024) - 4),
+            b"Y" + b"\0" * ((1024 * 1024) - 1),
+        ])
+        digest, mismatch = self.installer._hash_open_device(
+            source,
+            len(reference),
+            None,
+            reference=reference,
+        )
+        self.assertIsNotNone(digest)
+        self.assertEqual(mismatch, 4)
+
     def test_windows_createfile_error_includes_device_and_system_error(self):
         kernel32 = SimpleNamespace(
             CreateFileW=Mock(
@@ -353,7 +395,7 @@ class InstallerBackendTests(unittest.TestCase):
             ) as release,
             patch.object(
                 self.installer,
-                "_stream_and_verify_windows",
+                "_retry_windows_write_and_verify",
                 side_effect=PermissionError(13, "Permission denied"),
             ),
         ):
